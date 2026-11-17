@@ -1,0 +1,13 @@
+[package]
+name = "zeroplay-spike"
+description = "Milestone 0 test tool: sign in, list consoles, stream from an Xbox and send input."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zeroplay-xbox = { path = "../zeroplay-xbox" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "io-std", "io-util"] }

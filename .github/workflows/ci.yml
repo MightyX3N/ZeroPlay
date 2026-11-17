@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: cargo build --release --locked -p zeroplay-spike
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zeroplay-spike-${{ matrix.os }}
+          path: |
+            target/release/zeroplay-spike
+            target/release/zeroplay-spike.exe
+          if-no-files-found: error

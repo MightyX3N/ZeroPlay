@@ -1,0 +1,20 @@
+[package]
+name = "zeroplay-xbox"
+description = "Xbox Remote Play protocol for ZeroPlay: sign-in, console list, session setup, WebRTC stream and input."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+uuid = { version = "1", features = ["v4"] }
+webrtc = "0.21"
+rtc = "0.21"
+async-trait = "0.1"
+dirs = "6"
