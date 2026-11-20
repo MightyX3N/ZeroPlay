@@ -315,7 +315,9 @@ setInterval(async () => {
 
 let menuOpen = false;
 let menuIndex = 0;
-let keyboardOn = localStorage.getItem("zp-keyboard") === "on";
+let keyboardOn = localStorage.getItem("zp-keyboard") !== "off";
+const SENSITIVITIES = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+let mouseSens = Number(localStorage.getItem("zp-mouse-sens")) || 1;
 let statsOn = localStorage.getItem("zp-stats") === "on";
 const menuItems = () => [...document.querySelectorAll("#menu .menu-item")];
 
@@ -324,13 +326,15 @@ function renderMenu() {
   $("menu-title").textContent = status.stream.consoleName || "Xbox";
   const n = status.players.length;
   $("menu-players").textContent = `${n} playing · ${status.watching.length} watching`;
-  $("m-keyboard").textContent = `Keyboard controls: ${keyboardOn ? "on" : "off"}`;
+  $("m-keyboard").textContent = `Keyboard and mouse: ${keyboardOn ? "on" : "off"}`;
+  $("m-sens").textContent = `Mouse sensitivity: ${mouseSens}`;
   $("m-stats").textContent = statsOn ? "Hide stats" : "Show stats";
   show($("stats"), statsOn);
   menuItems().forEach((el, i) => el.classList.toggle("active", i === menuIndex));
 }
 
 function openMenu() {
+  if (document.pointerLockElement) document.exitPointerLock();
   menuOpen = true;
   menuIndex = 0;
   releaseAll();
@@ -347,7 +351,16 @@ $("m-resume").onclick = closeMenu;
 $("m-keyboard").onclick = () => {
   keyboardOn = !keyboardOn;
   localStorage.setItem("zp-keyboard", keyboardOn ? "on" : "off");
-  if (!keyboardOn) send({ t: "unplug", local: KEYBOARD_LOCAL });
+  if (!keyboardOn) {
+    send({ t: "unplug", local: KEYBOARD_LOCAL });
+    sent.delete(KEYBOARD_LOCAL);
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+  renderMenu();
+};
+$("m-sens").onclick = () => {
+  mouseSens = SENSITIVITIES[(SENSITIVITIES.indexOf(mouseSens) + 1) % SENSITIVITIES.length];
+  localStorage.setItem("zp-mouse-sens", String(mouseSens));
   renderMenu();
 };
 $("m-fullscreen").onclick = () => {
@@ -463,7 +476,11 @@ function pollPads() {
       sent.delete(local);
     }
   }
-  if (inStream && !menuOpen && keyboardOn && keysDown.size) sendPad(KEYBOARD_LOCAL, keyboardState());
+  updateMouseStick();
+  const kbActive = inStream && !menuOpen && keyboardOn && (keysDown.size > 0 || mouseLocked());
+  if (kbActive || kbWasActive) sendPad(KEYBOARD_LOCAL, kbActive ? keyboardState() : neutral());
+  kbWasActive = kbActive;
+  show($("mouse-hint"), inStream && !menuOpen && keyboardOn && !mouseLocked());
 }
 setInterval(pollPads, 8);
 
@@ -478,17 +495,108 @@ const KEY_BUTTONS = {
 const KEY_OTHER = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "KeyI", "KeyJ", "KeyK", "KeyL", "KeyZ", "KeyC"]);
 const keysDown = new Set();
 
+let kbWasActive = false;
+
 function keyboardState() {
   const k = (code) => (keysDown.has(code) ? 1 : 0);
-  let buttons = 0;
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  let buttons = mouseButtons | wheelButtons();
   for (const code of keysDown) buttons |= KEY_BUTTONS[code] || 0;
   return {
     buttons,
     lx: k("KeyD") - k("KeyA"), ly: k("KeyW") - k("KeyS"),
-    rx: k("KeyL") - k("KeyJ"), ry: k("KeyI") - k("KeyK"),
-    lt: k("KeyZ"), rt: k("KeyC"),
+    rx: clamp(k("KeyL") - k("KeyJ") + shapedX), ry: clamp(k("KeyI") - k("KeyK") + shapedY),
+    lt: Math.max(k("KeyZ"), mouseLT), rt: Math.max(k("KeyC"), mouseRT),
   };
 }
+
+// ── Mouse as the right stick (while the pointer is captured) ────────────────
+// Left click = RT, right click = LT, middle click = RS, wheel = RB / LB,
+// back / forward side buttons = B / Y.
+
+let mouseDX = 0;
+let mouseDY = 0;
+let stickX = 0;
+let stickY = 0;
+let mouseButtons = 0;
+let mouseLT = 0;
+let mouseRT = 0;
+let wheelBit = 0;
+let wheelUntil = 0;
+
+function mouseLocked() {
+  return document.pointerLockElement === $("video");
+}
+
+function wheelButtons() {
+  return performance.now() < wheelUntil ? wheelBit : 0;
+}
+
+// Mouse movement is turned into stick speed. Games ignore small stick
+// movements (their dead zone), so any movement starts past it.
+function updateMouseStick() {
+  const scale = mouseSens / 10;
+  const smooth = (current, delta) => current * 0.5 + delta * scale * 0.5;
+  stickX = smooth(stickX, mouseDX);
+  stickY = smooth(stickY, -mouseDY);
+  mouseDX = 0;
+  mouseDY = 0;
+  const shape = (v) => {
+    const a = Math.abs(v);
+    if (a < 0.01) return 0;
+    return Math.sign(v) * Math.min(1, 0.2 + a * 0.8);
+  };
+  stickX = Math.abs(stickX) < 0.01 ? 0 : stickX;
+  stickY = Math.abs(stickY) < 0.01 ? 0 : stickY;
+  stickX = Math.max(-1.5, Math.min(1.5, stickX));
+  stickY = Math.max(-1.5, Math.min(1.5, stickY));
+  shapedX = shape(stickX);
+  shapedY = shape(stickY);
+}
+let shapedX = 0;
+let shapedY = 0;
+
+$("video").addEventListener("click", () => {
+  if (keyboardOn && !menuOpen && !mouseLocked()) {
+    const request = $("video").requestPointerLock({ unadjustedMovement: true });
+    if (request && request.catch) request.catch(() => $("video").requestPointerLock());
+  }
+});
+
+document.addEventListener("pointerlockchange", () => {
+  if (!mouseLocked()) {
+    mouseButtons = 0;
+    mouseLT = 0;
+    mouseRT = 0;
+    stickX = stickY = shapedX = shapedY = 0;
+  }
+});
+
+document.addEventListener("mousemove", (event) => {
+  if (!mouseLocked()) return;
+  mouseDX += event.movementX;
+  mouseDY += event.movementY;
+});
+
+const MOUSE_BUTTONS = { 1: BTN.rs, 3: BTN.b, 4: BTN.y };
+function onMouseButton(event, down) {
+  if (!mouseLocked()) return;
+  event.preventDefault();
+  if (event.button === 0) mouseRT = down ? 1 : 0;
+  else if (event.button === 2) mouseLT = down ? 1 : 0;
+  else if (MOUSE_BUTTONS[event.button]) {
+    if (down) mouseButtons |= MOUSE_BUTTONS[event.button];
+    else mouseButtons &= ~MOUSE_BUTTONS[event.button];
+  }
+}
+document.addEventListener("mousedown", (event) => onMouseButton(event, true));
+document.addEventListener("mouseup", (event) => onMouseButton(event, false));
+document.addEventListener("contextmenu", (event) => { if (mouseLocked()) event.preventDefault(); });
+document.addEventListener("wheel", (event) => {
+  if (!mouseLocked() || !event.deltaY) return;
+  wheelBit = event.deltaY < 0 ? BTN.rb : BTN.lb;
+  wheelUntil = performance.now() + 120;
+}, { passive: true });
 
 window.addEventListener("keydown", (event) => {
   const inStream = !$("stream").classList.contains("hidden");

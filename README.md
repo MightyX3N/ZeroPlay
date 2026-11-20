@@ -48,10 +48,21 @@ web page (port 8080) and UDP for the video ports (50000-50009). Put the UDP
 tunnel's address in `ZEROPLAY_ANNOUNCE`.
 
 In the browser: controllers work as soon as they are plugged in, each in its
-own console slot (up to four players). Keyboard controls are switched on in the
-in-game menu (F1, Esc, or hold View + Menu): WASD left stick, IJKL right stick,
-arrows d-pad, Space A, B / Backspace B, X, Y, Q / E bumpers, Z / C triggers,
-Tab View, Enter Menu, H Xbox button.
+own console slot (up to four players). Keyboard and mouse work as a controller
+too (switch them off in the in-game menu: F1, or hold View + Menu). Click the
+picture to capture the mouse, Esc lets it go.
+
+| Keyboard / mouse | Controller |
+| --- | --- |
+| Mouse movement | Right stick (sensitivity in the menu) |
+| Left click / right click | RT / LT |
+| Middle click, wheel up / down | RS click, RB / LB |
+| Mouse back / forward buttons | B / Y |
+| WASD, IJKL, arrows | Left stick, right stick, d-pad |
+| Space, B or Backspace, X, Y | A, B, X, Y |
+| Q / E, Z / C | LB / RB, LT / RT |
+| F / G | LS / RS click |
+| Tab, Enter, H | View, Menu, Xbox button |
 
 ## What works
 
