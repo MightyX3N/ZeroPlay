@@ -255,6 +255,8 @@ function renderHome(s) {
     tile.onclick = () => { selected = c.id; renderHome(status); };
     return tile;
   }));
+  const chosen = document.querySelector(".tile.selected");
+  if (chosen) chosen.scrollIntoView({ block: "nearest", inline: "nearest" });
 
   renderPlayers(s);
 }
@@ -424,7 +426,10 @@ function renderMenu() {
   $("m-players").textContent = separatePlayers ? "Controllers here: separate players" : "Controllers here: one player";
   $("m-stats").textContent = statsOn ? "Hide stats" : "Show stats";
   show($("stats"), statsOn);
-  menuItems().forEach((el, i) => el.classList.toggle("active", i === menuIndex));
+  const visible = menuItems().filter((el) => !el.classList.contains("hidden"));
+  menuItems().forEach((el) => el.classList.toggle("active", el === visible[menuIndex]));
+  // Keep the selected item in view when moving with a controller.
+  if (menuOpen && visible[menuIndex]) visible[menuIndex].scrollIntoView({ block: "nearest" });
 }
 
 function openMenu() {
@@ -533,7 +538,7 @@ function pressed(local, bits, bit) {
 function navigate(bits, local) {
   const onHome = !$("home").classList.contains("hidden");
   if (menuOpen) {
-    const items = menuItems();
+    const items = menuItems().filter((el) => !el.classList.contains("hidden"));
     if (pressed(local, bits, BTN.down)) menuIndex = (menuIndex + 1) % items.length;
     if (pressed(local, bits, BTN.up)) menuIndex = (menuIndex + items.length - 1) % items.length;
     if (pressed(local, bits, BTN.a)) items[menuIndex].click();
