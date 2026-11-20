@@ -112,8 +112,9 @@ also has an **On this device** tab listing local Android games and emulators.
 
 ## Build order
 
-1. Server skeleton in Docker: wraps `zeroplay-xbox`, streams to one browser.
-2. Relay to several players, lobby, slots, invites.
+1. Server in Docker: wraps `zeroplay-xbox`, streams to browsers, one console
+   slot per controller. **Done** (also covers the relay part of step 2).
+2. Lobby, invites, permissions, player names.
 3. Input layer: rebinding, keyboard/mouse mapping, gyro, profiles.
 4. Game library, art cache, launch, wake flow.
 5. playit.gg tunnel.

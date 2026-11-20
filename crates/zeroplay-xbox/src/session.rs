@@ -121,13 +121,24 @@ pub async fn start_home_session(
     }
 }
 
-/// Where to save what the console sends. Leave a path out to skip that file.
+/// One RTP packet as it came from the console.
+#[derive(Clone, Debug)]
+pub enum MediaPacket {
+    /// H.264 video.
+    Video(rtc::rtp::Packet),
+    /// Opus audio, 48 kHz stereo.
+    Audio(rtc::rtp::Packet),
+}
+
+/// Where to send what the console sends. Leave a field out to skip it.
 #[derive(Clone, Debug, Default)]
 pub struct StreamOptions {
     /// Raw H.264 video (plays in VLC or ffplay).
     pub video_path: Option<PathBuf>,
     /// Opus audio in an Ogg file.
     pub audio_path: Option<PathBuf>,
+    /// Every video and audio packet, unchanged, for passing on to other peers.
+    pub media: Option<tokio::sync::broadcast::Sender<MediaPacket>>,
 }
 
 /// Things that happen during a stream.
@@ -390,6 +401,7 @@ impl PeerConnectionEventHandler for Handler {
                     },
                     None => None,
                 };
+                let media = self.options.media.clone();
                 tokio::spawn(async move {
                     while let Some(event) = track.poll().await {
                         if let TrackRemoteEvent::OnRtpPacket(packet) = event {
@@ -397,6 +409,9 @@ impl PeerConnectionEventHandler for Handler {
                             shared.counters.video_bytes.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                             if let Some(w) = writer.as_mut() {
                                 let _ = w.write_rtp(&packet);
+                            }
+                            if let Some(media) = &media {
+                                let _ = media.send(MediaPacket::Video(packet));
                             }
                         }
                     }
@@ -418,6 +433,7 @@ impl PeerConnectionEventHandler for Handler {
                     },
                     None => None,
                 };
+                let media = self.options.media.clone();
                 tokio::spawn(async move {
                     while let Some(event) = track.poll().await {
                         if let TrackRemoteEvent::OnRtpPacket(packet) = event {
@@ -425,6 +441,9 @@ impl PeerConnectionEventHandler for Handler {
                             shared.counters.audio_bytes.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                             if let Some(w) = writer.as_mut() {
                                 let _ = w.write_rtp(&packet);
+                            }
+                            if let Some(media) = &media {
+                                let _ = media.send(MediaPacket::Audio(packet));
                             }
                         }
                     }
@@ -496,7 +515,7 @@ pub struct Session {
     channels: Arc<Channels>,
     peer: Arc<dyn PeerConnection>,
     signaling: Arc<dyn Signaling>,
-    events: mpsc::UnboundedReceiver<SessionEvent>,
+    events: Option<mpsc::UnboundedReceiver<SessionEvent>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -640,12 +659,22 @@ impl Session {
         tasks.push(tokio::spawn(run_input_loop(shared.clone(), channels.clone())));
         tasks.push(tokio::spawn(run_keepalive(shared.clone(), signaling.clone())));
 
-        Ok(Session { shared, channels, peer, signaling, events, tasks })
+        Ok(Session { shared, channels, peer, signaling, events: Some(events), tasks })
     }
 
     /// The next thing that happened, or `None` once the session is gone.
     pub async fn next_event(&mut self) -> Option<SessionEvent> {
-        self.events.recv().await
+        match self.events.as_mut() {
+            Some(events) => events.recv().await,
+            None => None,
+        }
+    }
+
+    /// Takes the event stream out, so the session itself can be shared
+    /// (for example in an `Arc`) while one task reads the events.
+    /// [`Session::next_event`] returns `None` after this.
+    pub fn take_events(&mut self) -> Option<mpsc::UnboundedReceiver<SessionEvent>> {
+        self.events.take()
     }
 
     /// True once the console has accepted the handshake and input works.
@@ -717,7 +746,15 @@ impl Session {
 
     /// Ends the stream and frees the console.
     pub async fn close(self) -> Result<()> {
-        self.shared.closed.store(true, Ordering::Relaxed);
+        self.shutdown().await
+    }
+
+    /// Same as [`Session::close`], for a session that is shared. Calling it
+    /// more than once does nothing the second time.
+    pub async fn shutdown(&self) -> Result<()> {
+        if self.shared.closed.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
         for task in &self.tasks {
             task.abort();
         }

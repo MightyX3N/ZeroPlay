@@ -10,9 +10,43 @@ is Xbox Remote Play.
 
 The full plan is in [docs/plan.md](docs/plan.md).
 
-**Status: milestone 0.** There is no server or app yet. This repo holds the
-Xbox Remote Play protocol in Rust and a small command-line test tool that
-proves it works against a real console.
+**Status: step 1 of the plan.** The server runs in Docker, signs in to
+Microsoft, wakes the console, holds the stream and passes it on to every
+player's browser, with each player's controllers in their own console slot.
+No game library, rebinding or apps yet.
+
+## Run the server
+
+On the NAS (or any Linux machine on the same network as the Xbox):
+
+```
+git clone https://github.com/MightyX3N/ZeroPlay
+cd ZeroPlay
+docker compose up -d --build
+```
+
+Open `http://<nas-address>:8080`, press **Get a sign-in code** and enter the
+code at microsoft.com/link. The sign-in is kept in `zeroplay-data/`.
+
+Settings are in `docker-compose.yml`:
+
+| Setting | What it does |
+| --- | --- |
+| `ZEROPLAY_PASSWORD` | Password for the web page (any user name). Set it before using playit. |
+| `PLAYIT_SECRET` | playit.gg secret key. When set, the playit agent runs inside the container. |
+| `ZEROPLAY_RTC_PORTS` | UDP ports for video, one per connected player or watcher. Default `50000-50009`. |
+| `ZEROPLAY_ANNOUNCE` | Extra addresses players reach the video ports on, comma separated. `host` keeps the same ports; `host:12000` means the first video port is public port 12000 and the rest follow in order. |
+| `ZEROPLAY_HTTP` | Address of the web page. Default `0.0.0.0:8080`. |
+
+From outside the home network, two playit.gg tunnels are needed: TCP for the
+web page (port 8080) and UDP for the video ports (50000-50009). Put the UDP
+tunnel's address in `ZEROPLAY_ANNOUNCE`.
+
+In the browser: controllers work as soon as they are plugged in, each in its
+own console slot (up to four players). Keyboard controls are switched on in the
+in-game menu (F1, Esc, or hold View + Menu): WASD left stick, IJKL right stick,
+arrows d-pad, Space A, B / Backspace B, X, Y, Q / E bumpers, Z / C triggers,
+Tab View, Enter Menu, H Xbox button.
 
 ## What works
 
@@ -84,6 +118,10 @@ These need a real console, so they are run by hand:
 cargo test
 ```
 
+The server tests include the relay: fake console packets go in, a WebRTC peer
+playing the browser checks that video and sound come out with the payload
+types it asked for.
+
 The tests include a full session against a fake console in the same process:
 SDP and ICE exchange, the data channel handshake, gamepad, mouse and keyboard
 packets checked byte for byte, rumble, and video saved to a file. A fake console
@@ -95,6 +133,8 @@ cannot prove that a real Xbox accepts the same bytes; the checklist above does t
 | --- | --- |
 | `crates/zeroplay-xbox` | Xbox Remote Play: sign-in, console list, session API, WebRTC stream, input packets |
 | `crates/zeroplay-spike` | The command-line test tool |
+| `crates/zeroplay-server` | The server: web page, sign-in, stream relay to players, controller slots |
+| `Dockerfile`, `docker-compose.yml` | The Docker image, with the playit.gg agent |
 | `docs/plan.md` | The plan: NAS server, relay, input layer, addons, apps |
 
 ## Credits and licence

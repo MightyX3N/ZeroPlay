@@ -304,7 +304,7 @@ fn split_packet(packet: &[u8]) -> (u16, u32, &[u8]) {
 async fn a_full_session_against_a_fake_console() {
     let console = FakeConsole::new().await.unwrap();
     let video_path = std::env::temp_dir().join(format!("zeroplay-test-{}.h264", std::process::id()));
-    let options = StreamOptions { video_path: Some(video_path.clone()), audio_path: None };
+    let options = StreamOptions { video_path: Some(video_path.clone()), audio_path: None, ..Default::default() };
     let mut session = Session::connect(console.clone(), options).await.expect("the session should connect");
 
     // ── The offer ────────────────────────────────────────────────────────

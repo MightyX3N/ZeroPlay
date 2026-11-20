@@ -1,0 +1,21 @@
+services:
+  zeroplay:
+    build: .
+    image: zeroplay
+    container_name: zeroplay
+    restart: unless-stopped
+    # Host networking lets the console and players on the home network reach
+    # the media ports directly, and lets the playit agent see the server.
+    network_mode: host
+    volumes:
+      - ./zeroplay-data:/data
+    environment:
+      # Password for the web page. Set one before opening it to the internet.
+      ZEROPLAY_PASSWORD: ""
+      # playit.gg secret key (https://playit.gg/account/agents). Leave empty for home network only.
+      PLAYIT_SECRET: ""
+      # UDP ports for video, one per connected player or watcher.
+      ZEROPLAY_RTC_PORTS: "50000-50009"
+      # Extra addresses players can reach the video ports on, comma separated.
+      # A playit UDP tunnel for 50000-50009, for example: "example.at.ply.gg:12000"
+      ZEROPLAY_ANNOUNCE: ""
