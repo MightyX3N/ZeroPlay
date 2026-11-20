@@ -123,9 +123,11 @@ function renderRemote(s) {
   show($("remote-address-box"), !!p.web);
   show($("remote-waiting"), p.state === "running" && !p.web);
   if (p.web) {
-    $("remote-address").href = `http://${p.web}`;
-    $("remote-address").textContent = p.web;
+    $("remote-address").href = p.web;
+    $("remote-address").textContent = p.web.replace(/^https?:\/\//, "");
   }
+  show($("remote-reason"), !!p.reason);
+  $("remote-reason").textContent = p.reason || "";
   show($("remote-note"), !!p.note);
   $("remote-note").textContent = p.note || "";
   $("btn-playit-disconnect").textContent = p.state === "claiming" ? "Cancel" : "Unlink";

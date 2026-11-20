@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ZeroPlay server with the playit.gg agent built in.
 
 FROM rust:1-bookworm AS build
@@ -10,18 +11,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
-# playit.gg agent. Set PLAYIT_VERSION (for example 0.15.26) to pin a release.
+# playit.gg agent (playitd 2.0.2, BSD-2-Clause), pinned with checksums.
 ARG TARGETARCH
-ARG PLAYIT_VERSION=latest
-RUN set -eu; \
-    case "${TARGETARCH:-amd64}" in arm64) arch=aarch64 ;; *) arch=amd64 ;; esac; \
-    if [ "$PLAYIT_VERSION" = latest ]; then \
-      url="https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-$arch"; \
-    else \
-      url="https://github.com/playit-cloud/playit-agent/releases/download/v$PLAYIT_VERSION/playit-linux-$arch"; \
-    fi; \
-    curl -fsSL "$url" -o /usr/local/bin/playit; \
-    chmod +x /usr/local/bin/playit
+ADD --checksum=sha256:9d27a8dbb4d2d8a7107fcabfa33028c789a30a64c97a36447fe4afb94e08dde9 https://github.com/playit-cloud/playit-agent/releases/download/v2.0.2/playit-linux-amd64 /tmp/playit-amd64
+ADD --checksum=sha256:aed86fc2b82a772ca0e1d5cddec6c3123f96e12a099f7ae45aaa59a9a430a2cd https://github.com/playit-cloud/playit-agent/releases/download/v2.0.2/playit-linux-aarch64 /tmp/playit-arm64
+RUN cp "/tmp/playit-${TARGETARCH:-amd64}" /usr/local/bin/playit && chmod 755 /usr/local/bin/playit && rm -f /tmp/playit-*
 
 COPY --from=build /src/target/release/zeroplay-server /usr/local/bin/zeroplay-server
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

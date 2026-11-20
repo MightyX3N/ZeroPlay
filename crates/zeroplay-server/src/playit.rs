@@ -25,7 +25,7 @@ const API: &str = "https://api.playit.gg";
 #[derive(Clone, Debug, PartialEq)]
 enum State {
     Off,
-    Claiming { url: String },
+    Claiming { url: String, reason: Option<String> },
     Running,
     Failed { message: String },
 }
@@ -114,7 +114,7 @@ impl Playit {
     pub fn status(&self) -> Value {
         match &*self.state.lock().unwrap() {
             State::Off => json!({ "state": "off" }),
-            State::Claiming { url } => json!({ "state": "claiming", "url": url }),
+            State::Claiming { url, reason } => json!({ "state": "claiming", "url": url, "reason": reason }),
             State::Running => {
                 let t = self.tunnels.lock().unwrap().clone();
                 json!({
@@ -133,10 +133,14 @@ impl Playit {
         if matches!(*self.state.lock().unwrap(), State::Claiming { .. } | State::Running) {
             return;
         }
+        self.start_claim(None);
+    }
+
+    fn start_claim(self: &Arc<Self>, reason: Option<String>) {
         let code = claim_code();
         let url = format!("https://playit.gg/claim/{code}");
         let generation = self.next_generation();
-        self.set(State::Claiming { url });
+        self.set(State::Claiming { url, reason });
         let playit = self.clone();
         tokio::spawn(async move {
             match playit.claim(&code, generation).await {
@@ -144,6 +148,7 @@ impl Playit {
                     if !playit.is_current(generation) {
                         return;
                     }
+                    let _ = tokio::fs::write(playit.claim_type_path(), "self-managed\n").await;
                     match playit.save_secret(&secret).await {
                         Ok(()) => playit.clone().spawn_agent(generation),
                         Err(error) => playit.set(State::Failed { message: format!("Could not save the key: {error:#}") }),
@@ -158,10 +163,15 @@ impl Playit {
         });
     }
 
+    fn claim_type_path(&self) -> PathBuf {
+        self.secret_path.with_file_name("playit-claim-type")
+    }
+
     /// Stops the agent and forgets its key.
     pub async fn disconnect(&self) {
         self.next_generation();
         let _ = tokio::fs::remove_file(&self.secret_path).await;
+        let _ = tokio::fs::remove_file(self.claim_type_path()).await;
         *self.tunnels.lock().unwrap() = Tunnels::default();
         self.set(State::Off);
     }
@@ -200,16 +210,39 @@ impl Playit {
         let mut tried: Vec<&'static str> = Vec::new();
         tokio::time::sleep(Duration::from_secs(3)).await;
         while self.is_current(generation) {
-            if let Err(error) = self.check_tunnels(&mut tried).await {
-                println!("[playit] tunnels: {error:#}");
-                self.tunnels.lock().unwrap().note = Some(format!("{error:#}"));
-                let _ = self.updates.send(());
+            match self.check_tunnels(&mut tried).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Linked the old way: this key may not create tunnels. Link again
+                    // as a self-managed agent, which may.
+                    let self_managed = tokio::fs::read_to_string(self.claim_type_path()).await.is_ok_and(|t| t.trim() == "self-managed");
+                    if !self_managed {
+                        println!("[playit] the agent key is read-only; asking to link again");
+                        self.disconnect().await;
+                        self.start_claim(Some("playit has to be linked once more so ZeroPlay can create its tunnels.".to_owned()));
+                        return;
+                    }
+                    let note = format!(
+                        "playit does not let this agent create tunnels. Create them on playit.gg for this agent: TCP to 127.0.0.1 port {}, and UDP to {} port {}.",
+                        self.web_port,
+                        lan_ip(),
+                        self.rtc_ports.first().copied().unwrap_or(50000)
+                    );
+                    self.tunnels.lock().unwrap().note = Some(note);
+                    let _ = self.updates.send(());
+                }
+                Err(error) => {
+                    println!("[playit] tunnels: {error:#}");
+                    self.tunnels.lock().unwrap().note = Some(format!("{error:#}"));
+                    let _ = self.updates.send(());
+                }
             }
             tokio::time::sleep(Duration::from_secs(20)).await;
         }
     }
 
-    async fn check_tunnels(&self, tried: &mut Vec<&'static str>) -> Result<()> {
+    /// Returns `Ok(false)` when playit says this key may not create tunnels.
+    async fn check_tunnels(&self, tried: &mut Vec<&'static str>) -> Result<bool> {
         let data = match self.call_as_agent("/v1/agents/rundata", json!({})).await? {
             ApiResult::Success(data) => data,
             other => bail!("playit.gg would not list the tunnels: {}", describe(&other)),
@@ -218,33 +251,67 @@ impl Playit {
         let listed = |key: &str| -> Vec<Value> { data.get(key).and_then(Value::as_array).cloned().unwrap_or_default() };
         let tunnels = listed("tunnels");
         let pending = listed("pending");
-        let find = |name: &str| tunnels.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)).cloned();
+        // A tunnel counts by its name, or by where it points (so tunnels made by
+        // hand on playit.gg are found too).
+        let video_port = self.rtc_ports.first().copied().unwrap_or(50000);
+        let target = |name: &str| if name == WEB_TUNNEL { ("tcp", self.web_port) } else { ("udp", video_port) };
+        let matches = |t: &Value, name: &str| {
+            if t.get("name").and_then(Value::as_str) == Some(name) {
+                return true;
+            }
+            let (kind, port) = target(name);
+            let field = |wanted: &str| {
+                t.pointer("/agent_config/fields")
+                    .and_then(Value::as_array)
+                    .and_then(|fields| fields.iter().find(|f| f.get("name").and_then(Value::as_str) == Some(wanted)))
+                    .and_then(|f| f.get("value").and_then(Value::as_str))
+                    .and_then(|v| v.trim().parse::<u16>().ok())
+            };
+            if kind == "tcp" && field("http_port") == Some(port) {
+                return true;
+            }
+            t.get("port_type").and_then(Value::as_str) == Some(kind) && field("local_port") == Some(port)
+        };
+        let find = |name: &str| tunnels.iter().find(|t| matches(t, name)).cloned();
         let is_pending = |name: &str| pending.iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
+        let read_only = |error: &anyhow::Error| error.to_string().contains("NotAllowedWithReadOnly");
 
         let mut notes: Vec<String> = Vec::new();
         if find(WEB_TUNNEL).is_none() && !is_pending(WEB_TUNNEL) && !tried.contains(&WEB_TUNNEL) {
             tried.push(WEB_TUNNEL);
-            if let Err(error) = self.create_tunnel(&agent_id, WEB_TUNNEL, "tcp", 1, "127.0.0.1", self.web_port).await {
+            if let Err(error) = self.create_web_tunnel(&agent_id).await {
+                if read_only(&error) {
+                    tried.clear();
+                    return Ok(false);
+                }
                 notes.push(format!("Could not create the page tunnel: {error:#}"));
             }
         }
         if find(VIDEO_TUNNEL).is_none() && !is_pending(VIDEO_TUNNEL) && !tried.contains(&VIDEO_TUNNEL) {
             tried.push(VIDEO_TUNNEL);
-            let first = self.rtc_ports.first().copied().unwrap_or(50000);
-            let ip = lan_ip();
             let count = self.rtc_ports.len().min(u16::MAX as usize) as u16;
-            if let Err(error) = self.create_tunnel(&agent_id, VIDEO_TUNNEL, "udp", count, &ip, first).await {
+            if let Err(error) = self.create_video_tunnel(&agent_id, count).await {
+                if read_only(&error) {
+                    tried.clear();
+                    return Ok(false);
+                }
                 // Port ranges need playit premium; one port works on a free account.
                 println!("[playit] {count} video ports refused ({error:#}), trying one port");
-                match self.create_tunnel(&agent_id, VIDEO_TUNNEL, "udp", 1, &ip, first).await {
+                match self.create_video_tunnel(&agent_id, 1).await {
                     Ok(()) => notes.push("Free playit account: one video port, so one player at a time from outside your home. playit premium allows more.".to_owned()),
+                    Err(error) if error.to_string().contains("Premium") => notes.push(
+                        "The video tunnel (UDP) needs playit Premium. The page works from outside, but video from outside needs Premium for now.".to_owned(),
+                    ),
                     Err(error) => notes.push(format!("Could not create the video tunnel: {error:#}")),
                 }
             }
         }
 
         let address = |tunnel: &Value| tunnel.get("display_address").and_then(Value::as_str).map(str::to_owned);
-        let web = find(WEB_TUNNEL).and_then(|t| address(&t));
+        let web = find(WEB_TUNNEL).and_then(|t| {
+            let https = t.get("tunnel_type").and_then(Value::as_str) == Some("https");
+            address(&t).map(|a| format!("{}{a}", if https { "https://" } else { "http://" }))
+        });
         let video = find(VIDEO_TUNNEL).and_then(|t| {
             let (host, port) = address(&t)?.rsplit_once(':').map(|(h, p)| (h.to_owned(), p.parse::<u16>().ok()))?;
             let count = t.get("port_count").and_then(Value::as_u64).unwrap_or(1) as u16;
@@ -259,33 +326,59 @@ impl Playit {
             drop(current);
             let _ = self.updates.send(());
         }
-        Ok(())
+        Ok(true)
     }
 
-    /// Creates a tunnel to this agent with playit's tunnel API (the same
-    /// request playit's own command-line tool used for `tunnels prepare`).
-    async fn create_tunnel(&self, agent_id: &str, name: &str, port_type: &str, ports: u16, local_ip: &str, local_port: u16) -> Result<()> {
+    /// Creates a tunnel to this agent, with the request body playit.gg's own
+    /// website sends (the same one Korie uses).
+    async fn create_tunnel(&self, agent_id: &str, name: &str, protocol: Value, fields: Value) -> Result<()> {
         let body = json!({
             "name": name,
-            "tunnel_type": null,
-            "port_type": port_type,
-            "port_count": ports,
-            "origin": {
-                "type": "agent",
-                "data": { "agent_id": agent_id, "local_ip": local_ip, "local_port": local_port },
-            },
+            "protocol": protocol,
+            "origin": { "type": "agent", "data": { "agent_id": agent_id, "config": { "fields": fields } } },
+            "endpoint": { "type": "region", "details": { "region": "global", "port": null } },
             "enabled": true,
-            "alloc": null,
-            "firewall_id": null,
-            "proxy_protocol": null,
         });
-        match self.call_as_agent("/tunnels/create", body).await? {
+        match self.call_as_agent("/v1/tunnels/create", body).await? {
             ApiResult::Success(_) => {
-                println!("[playit] created tunnel \"{name}\" ({port_type}, {ports} port(s) to {local_ip}:{local_port})");
+                println!("[playit] created tunnel \"{name}\"");
                 Ok(())
             }
             other => bail!("{}", describe(&other)),
         }
+    }
+
+    /// The page: an HTTPS tunnel (free; playit holds the certificate and passes
+    /// plain HTTP on to the remote port).
+    async fn create_web_tunnel(&self, agent_id: &str) -> Result<()> {
+        let port = self.web_port.to_string();
+        self.create_tunnel(
+            agent_id,
+            WEB_TUNNEL,
+            json!({ "type": "tunnel-type", "details": "https" }),
+            json!([
+                { "name": "local_ip", "value": "127.0.0.1" },
+                { "name": "http_port", "value": port },
+                { "name": "https_port", "value": port },
+                { "name": "tls_termination", "value": "letsencrypt" },
+            ]),
+        )
+        .await
+    }
+
+    /// The video: raw UDP ports to the media ports.
+    async fn create_video_tunnel(&self, agent_id: &str, count: u16) -> Result<()> {
+        let first = self.rtc_ports.first().copied().unwrap_or(50000);
+        self.create_tunnel(
+            agent_id,
+            VIDEO_TUNNEL,
+            json!({ "type": "raw-ports", "details": { "port_type": "udp", "port_count": count, "software_description": "ZeroPlay game streaming video (WebRTC)" } }),
+            json!([
+                { "name": "local_ip", "value": lan_ip() },
+                { "name": "local_port", "value": first.to_string() },
+            ]),
+        )
+        .await
     }
 
     async fn claim(&self, code: &str, generation: u64) -> Result<String> {
@@ -298,7 +391,7 @@ impl Playit {
             if Instant::now() > deadline {
                 bail!("The claim link was not approved within 15 minutes. Try again.");
             }
-            let body = json!({ "code": code, "agent_type": "assignable", "version": concat!("ZeroPlay ", env!("CARGO_PKG_VERSION")) });
+            let body = json!({ "code": code, "agent_type": "self-managed", "version": concat!("ZeroPlay ", env!("CARGO_PKG_VERSION")) });
             match self.call("/claim/setup", body).await {
                 Ok(ApiResult::Success(Value::String(step))) => match step.as_str() {
                     "UserAccepted" => break,
@@ -423,9 +516,14 @@ fn lan_ip() -> String {
 }
 
 fn describe(result: &ApiResult) -> String {
-    match result {
-        ApiResult::Success(v) | ApiResult::Fail(v) | ApiResult::Error(v) => v.to_string(),
+    let value = match result {
+        ApiResult::Success(v) | ApiResult::Fail(v) | ApiResult::Error(v) => v,
+    };
+    let text = value.as_str().map(str::to_owned).or_else(|| value.get("message").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| value.to_string());
+    if text == "RequiresPlayitPremium" || text == "PublicPortRequiresPlayitPremium" {
+        return "this needs playit Premium on your playit.gg account".to_owned();
     }
+    text
 }
 
 /// Ten hex characters, like `playit setup` makes.
