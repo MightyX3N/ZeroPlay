@@ -17,6 +17,7 @@ use zeroplay_xbox::input::{GamepadState, KeyboardFrame, MouseFrame};
 use zeroplay_xbox::reqwest;
 use zeroplay_xbox::session::{start_home_session, MediaPacket, Session, SessionEvent, StreamOptions};
 
+use crate::access::Access;
 use crate::config::Config;
 use crate::playit::Playit;
 
@@ -42,6 +43,8 @@ enum StreamState {
 
 struct Viewer {
     name: String,
+    /// On the home network (through the home port).
+    home: bool,
     direct: mpsc::UnboundedSender<Direct>,
 }
 
@@ -76,6 +79,7 @@ pub struct App {
     pub media: broadcast::Sender<MediaPacket>,
     updates: broadcast::Sender<()>,
     pub playit: Arc<Playit>,
+    pub access: Access,
 }
 
 impl App {
@@ -87,7 +91,8 @@ impl App {
         let (media, _) = broadcast::channel(2048);
         let (updates, _) = broadcast::channel(64);
         let free_ports = config.rtc_ports.iter().rev().copied().collect();
-        let playit = Playit::new(&config.data_dir, http.clone(), updates.clone());
+        let playit = Playit::new(&config.data_dir, config.remote_addr.port(), config.rtc_ports.clone(), http.clone(), updates.clone());
+        let access = Access::load(&config.data_dir).await?;
         let app = Arc::new(App {
             config,
             auth: tokio::sync::Mutex::new(auth),
@@ -111,6 +116,7 @@ impl App {
             media,
             updates,
             playit,
+            access,
         });
         app.playit.start_if_linked().await;
         if signed_in {
@@ -120,7 +126,7 @@ impl App {
         Ok(app)
     }
 
-    fn changed(&self) {
+    pub fn changed(&self) {
         let _ = self.updates.send(());
     }
 
@@ -130,10 +136,10 @@ impl App {
 
     // ── Players ────────────────────────────────────────────────────────────
 
-    pub fn add_viewer(&self) -> (u64, mpsc::UnboundedReceiver<Direct>) {
+    pub fn add_viewer(&self, home: bool) -> (u64, mpsc::UnboundedReceiver<Direct>) {
         let id = self.next_viewer.fetch_add(1, Ordering::Relaxed);
         let (direct, rx) = mpsc::unbounded_channel();
-        self.inner.lock().unwrap().viewers.insert(id, Viewer { name: format!("Player {id}"), direct });
+        self.inner.lock().unwrap().viewers.insert(id, Viewer { name: format!("Player {id}"), home, direct });
         self.changed();
         (id, rx)
     }
@@ -579,7 +585,12 @@ impl App {
             "stream": stream,
             "players": players,
             "watching": watching,
-            "you": { "id": id, "name": inner.viewers.get(&id).map(|v| v.name.clone()) },
+            "you": {
+                "id": id,
+                "name": inner.viewers.get(&id).map(|v| v.name.clone()),
+                "home": inner.viewers.get(&id).is_some_and(|v| v.home),
+            },
+            "passwordSet": self.access.has_password(),
             "playit": self.playit.status(),
         })
     }

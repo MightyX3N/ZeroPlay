@@ -1,9 +1,12 @@
-//! playit.gg tunnel: linking the agent with a claim link, and running it.
+//! playit.gg tunnel: linking the agent with a claim link, running it, and
+//! creating its tunnels.
 //!
 //! The claim works like `playit setup`: we make a random code, the person
 //! opens playit.gg/claim/<code> and approves it, and playit's API then hands
 //! us the agent's secret key. The key is kept in the data folder and the
-//! playit agent (`playitd`) is started with it.
+//! playit agent (`playitd`) is started with it. With the same key we create
+//! two tunnels, one for the page (TCP) and one for the video (UDP), and read
+//! back their public addresses.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -27,8 +30,25 @@ enum State {
     Failed { message: String },
 }
 
+/// The tunnels' public addresses, once playit has made them.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Tunnels {
+    /// `host:port` of the page.
+    web: Option<String>,
+    /// Host and first port of the video ports, and how many ports.
+    video: Option<(String, u16, u16)>,
+    /// Something the person should know (for example a playit limit).
+    note: Option<String>,
+}
+
+const WEB_TUNNEL: &str = "ZeroPlay web";
+const VIDEO_TUNNEL: &str = "ZeroPlay video";
+
 pub struct Playit {
     secret_path: PathBuf,
+    web_port: u16,
+    rtc_ports: Vec<u16>,
+    tunnels: Mutex<Tunnels>,
     program: String,
     http: reqwest::Client,
     state: Mutex<State>,
@@ -47,10 +67,19 @@ enum ApiResult {
 }
 
 impl Playit {
-    pub fn new(data_dir: &std::path::Path, http: reqwest::Client, updates: broadcast::Sender<()>) -> Arc<Playit> {
+    pub fn new(
+        data_dir: &std::path::Path,
+        web_port: u16,
+        rtc_ports: Vec<u16>,
+        http: reqwest::Client,
+        updates: broadcast::Sender<()>,
+    ) -> Arc<Playit> {
         let program = std::env::var("ZEROPLAY_PLAYIT_BIN").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "playit".to_owned());
         Arc::new(Playit {
             secret_path: data_dir.join("playit-secret"),
+            web_port,
+            rtc_ports,
+            tunnels: Mutex::new(Tunnels::default()),
             program,
             http,
             state: Mutex::new(State::Off),
@@ -74,17 +103,8 @@ impl Playit {
         *self.generation.lock().unwrap() == generation
     }
 
-    /// At startup: take a key from PLAYIT_SECRET if one is given, and start the
-    /// agent if a key is saved.
+    /// At startup: start the agent if it was linked before.
     pub async fn start_if_linked(self: &Arc<Self>) {
-        if let Ok(secret) = std::env::var("PLAYIT_SECRET") {
-            let secret = secret.trim();
-            if !secret.is_empty() {
-                if let Err(error) = self.save_secret(secret).await {
-                    println!("[playit] could not save PLAYIT_SECRET: {error:#}");
-                }
-            }
-        }
         if tokio::fs::try_exists(&self.secret_path).await.unwrap_or(false) {
             let generation = self.next_generation();
             self.clone().spawn_agent(generation);
@@ -95,7 +115,15 @@ impl Playit {
         match &*self.state.lock().unwrap() {
             State::Off => json!({ "state": "off" }),
             State::Claiming { url } => json!({ "state": "claiming", "url": url }),
-            State::Running => json!({ "state": "running" }),
+            State::Running => {
+                let t = self.tunnels.lock().unwrap().clone();
+                json!({
+                    "state": "running",
+                    "web": t.web,
+                    "videoPorts": t.video.as_ref().map(|(_, _, count)| *count),
+                    "note": t.note,
+                })
+            }
             State::Failed { message } => json!({ "state": "failed", "error": message }),
         }
     }
@@ -134,6 +162,7 @@ impl Playit {
     pub async fn disconnect(&self) {
         self.next_generation();
         let _ = tokio::fs::remove_file(&self.secret_path).await;
+        *self.tunnels.lock().unwrap() = Tunnels::default();
         self.set(State::Off);
     }
 
@@ -141,6 +170,121 @@ impl Playit {
         let response = self.http.post(format!("{API}{path}")).json(&body).send().await?;
         let text = response.text().await?;
         serde_json::from_str(&text).map_err(|_| anyhow!("playit.gg answered something unexpected: {text}"))
+    }
+
+    async fn call_as_agent(&self, path: &str, body: Value) -> Result<ApiResult> {
+        let secret = tokio::fs::read_to_string(&self.secret_path).await?;
+        let response = self
+            .http
+            .post(format!("{API}{path}"))
+            .header("Authorization", format!("Agent-Key {}", secret.trim()))
+            .json(&body)
+            .send()
+            .await?;
+        let text = response.text().await?;
+        serde_json::from_str(&text).map_err(|_| anyhow!("playit.gg answered something unexpected: {text}"))
+    }
+
+    /// The public address for a player's video port, if the video tunnel covers it.
+    pub fn video_address(&self, port_index: usize) -> Option<(String, u16)> {
+        let tunnels = self.tunnels.lock().unwrap();
+        let (host, first, count) = tunnels.video.as_ref()?;
+        if port_index >= *count as usize {
+            return None;
+        }
+        Some((host.clone(), first.saturating_add(port_index as u16)))
+    }
+
+    /// Keeps the two tunnels in place and their addresses up to date.
+    async fn manage_tunnels(self: Arc<Self>, generation: u64) {
+        let mut tried: Vec<&'static str> = Vec::new();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        while self.is_current(generation) {
+            if let Err(error) = self.check_tunnels(&mut tried).await {
+                println!("[playit] tunnels: {error:#}");
+                self.tunnels.lock().unwrap().note = Some(format!("{error:#}"));
+                let _ = self.updates.send(());
+            }
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        }
+    }
+
+    async fn check_tunnels(&self, tried: &mut Vec<&'static str>) -> Result<()> {
+        let data = match self.call_as_agent("/v1/agents/rundata", json!({})).await? {
+            ApiResult::Success(data) => data,
+            other => bail!("playit.gg would not list the tunnels: {}", describe(&other)),
+        };
+        let agent_id = data.get("agent_id").and_then(Value::as_str).ok_or_else(|| anyhow!("playit.gg sent no agent id"))?.to_owned();
+        let listed = |key: &str| -> Vec<Value> { data.get(key).and_then(Value::as_array).cloned().unwrap_or_default() };
+        let tunnels = listed("tunnels");
+        let pending = listed("pending");
+        let find = |name: &str| tunnels.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)).cloned();
+        let is_pending = |name: &str| pending.iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
+
+        let mut note = None;
+        if find(WEB_TUNNEL).is_none() && !is_pending(WEB_TUNNEL) && !tried.contains(&WEB_TUNNEL) {
+            tried.push(WEB_TUNNEL);
+            if let Err(error) = self.create_tunnel(&agent_id, WEB_TUNNEL, "custom-tcp", 1, "127.0.0.1", self.web_port).await {
+                note = Some(format!("Could not create the page tunnel: {error:#}"));
+            }
+        }
+        if find(VIDEO_TUNNEL).is_none() && !is_pending(VIDEO_TUNNEL) && !tried.contains(&VIDEO_TUNNEL) {
+            tried.push(VIDEO_TUNNEL);
+            let first = self.rtc_ports.first().copied().unwrap_or(50000);
+            let ip = lan_ip();
+            let count = self.rtc_ports.len().min(u16::MAX as usize) as u16;
+            if let Err(error) = self.create_tunnel(&agent_id, VIDEO_TUNNEL, "custom-udp", count, &ip, first).await {
+                // Port ranges need playit premium; one port works on a free account.
+                println!("[playit] {count} video ports refused ({error:#}), trying one port");
+                match self.create_tunnel(&agent_id, VIDEO_TUNNEL, "custom-udp", 1, &ip, first).await {
+                    Ok(()) => note = Some("Free playit account: one video port, so one player at a time from outside your home. playit premium allows more.".to_owned()),
+                    Err(error) => note = Some(format!("Could not create the video tunnel: {error:#}")),
+                }
+            }
+        }
+
+        let address = |tunnel: &Value| tunnel.get("display_address").and_then(Value::as_str).map(str::to_owned);
+        let web = find(WEB_TUNNEL).and_then(|t| address(&t));
+        let video = find(VIDEO_TUNNEL).and_then(|t| {
+            let (host, port) = address(&t)?.rsplit_once(':').map(|(h, p)| (h.to_owned(), p.parse::<u16>().ok()))?;
+            let count = t.get("port_count").and_then(Value::as_u64).unwrap_or(1) as u16;
+            Some((host, port?, count))
+        });
+        let mut current = self.tunnels.lock().unwrap();
+        let new = Tunnels { web, video, note: note.or_else(|| current.note.clone().filter(|n| n.starts_with("Free playit"))) };
+        if *current != new {
+            *current = new;
+            drop(current);
+            let _ = self.updates.send(());
+        }
+        Ok(())
+    }
+
+    async fn create_tunnel(&self, agent_id: &str, name: &str, kind: &str, ports: u16, local_ip: &str, local_port: u16) -> Result<()> {
+        let body = json!({
+            "name": name,
+            "ports": { "type": kind, "details": ports },
+            "origin": {
+                "type": "agent",
+                "data": {
+                    "agent_id": agent_id,
+                    "config": { "fields": [
+                        { "name": "local_ip", "value": local_ip },
+                        { "name": "local_port", "value": local_port.to_string() },
+                    ] },
+                },
+            },
+            "enabled": true,
+            "alloc": null,
+            "firewall_id": null,
+        });
+        match self.call_as_agent("/v1/tunnels/create", body).await? {
+            ApiResult::Success(_) => {
+                println!("[playit] created tunnel \"{name}\" ({kind}, {ports} port(s) to {local_ip}:{local_port})");
+                Ok(())
+            }
+            other => bail!("{}", describe(&other)),
+        }
     }
 
     async fn claim(&self, code: &str, generation: u64) -> Result<String> {
@@ -205,6 +349,7 @@ impl Playit {
 
     /// Runs the agent, restarting it if it stops, until disconnected.
     fn spawn_agent(self: Arc<Self>, generation: u64) {
+        tokio::spawn(self.clone().manage_tunnels(generation));
         tokio::spawn(async move {
             let mut wait = Duration::from_secs(5);
             while self.is_current(generation) {
@@ -261,6 +406,19 @@ impl Playit {
             }
         });
     }
+}
+
+/// This machine's address on the home network (the one it would use to
+/// reach the internet). The video tunnel points here, because the video
+/// sockets listen on the network addresses, not on 127.0.0.1.
+fn lan_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect("1.1.1.1:80")?;
+            socket.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_owned())
 }
 
 fn describe(result: &ApiResult) -> String {

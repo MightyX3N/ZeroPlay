@@ -65,6 +65,39 @@
   </footer>
 </main>
 
+<section id="login" class="screen center hidden">
+  <form id="login-form" class="panel">
+    <h1>ZeroPlay</h1>
+    <label class="field">Password
+      <input id="login-password" type="password" autocomplete="current-password" required>
+    </label>
+    <button class="btn primary" type="submit">Log in</button>
+    <p id="login-error" class="error hidden"></p>
+  </form>
+</section>
+
+<section id="setpass" class="screen center hidden">
+  <form id="setpass-form" class="panel">
+    <h1>Choose a password</h1>
+    <p class="muted">Everyone uses this password to open ZeroPlay, at home and through remote access.</p>
+    <label class="field">Password (at least 8 characters)
+      <input id="setpass-password" type="password" autocomplete="new-password" minlength="8" required>
+    </label>
+    <label class="field">Same password again
+      <input id="setpass-again" type="password" autocomplete="new-password" minlength="8" required>
+    </label>
+    <button class="btn primary" type="submit">Save password</button>
+    <p id="setpass-error" class="error hidden"></p>
+  </form>
+</section>
+
+<section id="notsetup" class="screen center hidden">
+  <div class="panel">
+    <h1>Not set up yet</h1>
+    <p class="muted">Open ZeroPlay from your home network first to sign in and choose a password.</p>
+  </div>
+</section>
+
 <section id="signin" class="screen center hidden">
   <div class="panel">
     <h1>Sign in to Xbox</h1>
@@ -95,9 +128,14 @@
     </div>
     <div id="remote-running" class="hidden">
       <p><b>playit.gg is linked and running.</b></p>
-      <p class="muted small">On playit.gg, add two tunnels to this agent: TCP to port 8080 (this page) and UDP to ports 50000-50009 (video). Put the UDP tunnel's address in ZEROPLAY_ANNOUNCE.</p>
-      <a class="btn secondary" href="https://playit.gg/account/tunnels" target="_blank" rel="noopener">Open playit.gg tunnels</a>
+      <div id="remote-address-box" class="hidden">
+        <p>Open ZeroPlay from anywhere at:</p>
+        <a id="remote-address" class="link-box" href="#" target="_blank" rel="noopener"></a>
+      </div>
+      <p id="remote-waiting" class="muted small">Creating the tunnels…</p>
+      <p id="remote-note" class="muted small hidden"></p>
     </div>
+    <p id="remote-away" class="muted small hidden">Remote access can only be changed from your home network.</p>
     <p id="remote-error" class="error hidden"></p>
     <div class="row">
       <button id="btn-playit-disconnect" class="btn secondary hidden">Unlink</button>

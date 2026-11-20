@@ -4,7 +4,7 @@
 
 const $ = (id) => document.getElementById(id);
 const show = (el, on) => el.classList.toggle("hidden", !on);
-const screens = ["home", "signin", "waking", "stream"];
+const screens = ["home", "login", "setpass", "notsetup", "signin", "waking", "stream"];
 function showScreen(name) {
   for (const s of screens) show($(s), s === name);
 }
@@ -39,6 +39,49 @@ function send(message) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
 }
 
+// ── Getting in: the password ────────────────────────────────────────────────
+
+async function checkAccess() {
+  try {
+    const response = await fetch("/api/access", { cache: "no-store" });
+    const access = await response.json();
+    if (access.verdict === "ok") return connect();
+    showScreen(access.verdict === "loginNeeded" ? "login" : "notsetup");
+    if (access.verdict === "loginNeeded") $("login-password").focus();
+  } catch {
+    setTimeout(checkAccess, 2000);
+  }
+}
+
+async function postPassword(url, password) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (response.ok) return null;
+  const body = await response.json().catch(() => ({}));
+  return body.error || "That did not work.";
+}
+
+$("login-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const error = await postPassword("/api/login", $("login-password").value);
+  show($("login-error"), !!error);
+  $("login-error").textContent = error || "";
+  if (!error) { $("login-password").value = ""; checkAccess(); }
+};
+
+$("setpass-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const password = $("setpass-password").value;
+  let error = password !== $("setpass-again").value ? "The two passwords are not the same." : null;
+  if (!error) error = await postPassword("/api/password", password);
+  show($("setpass-error"), !!error);
+  $("setpass-error").textContent = error || "";
+  if (!error) { $("setpass-password").value = $("setpass-again").value = ""; }
+};
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
@@ -56,7 +99,7 @@ function connect() {
   ws.onclose = () => {
     $("console-info").textContent = "Lost the connection to the server, retrying…";
     stopWatching();
-    setTimeout(connect, 2000);
+    setTimeout(checkAccess, 2000);
   };
 }
 
@@ -68,12 +111,23 @@ let wantWatch = false;
 let remoteOpen = false;
 
 function renderRemote(s) {
+  if (!s) return;
   const p = s.playit || { state: "off" };
   show($("remote"), remoteOpen);
-  show($("remote-off"), p.state === "off" || p.state === "failed");
+  const home = !!(s.you && s.you.home);
+  show($("remote-off"), home && (p.state === "off" || p.state === "failed"));
   show($("remote-claiming"), p.state === "claiming");
   show($("remote-running"), p.state === "running");
-  show($("btn-playit-disconnect"), p.state !== "off");
+  show($("remote-away"), !home);
+  show($("btn-playit-disconnect"), home && p.state !== "off");
+  show($("remote-address-box"), !!p.web);
+  show($("remote-waiting"), p.state === "running" && !p.web);
+  if (p.web) {
+    $("remote-address").href = `http://${p.web}`;
+    $("remote-address").textContent = p.web;
+  }
+  show($("remote-note"), !!p.note);
+  $("remote-note").textContent = p.note || "";
   $("btn-playit-disconnect").textContent = p.state === "claiming" ? "Cancel" : "Unlink";
   show($("remote-error"), !!p.error);
   $("remote-error").textContent = p.error || "";
@@ -103,6 +157,10 @@ function onStatus(s) {
     stopWatching();
     renderSignin(s);
     showScreen("signin");
+    return;
+  }
+  if (!s.passwordSet) {
+    showScreen("setpass");
     return;
   }
   if (stream.state === "starting") {
@@ -710,4 +768,4 @@ function onRumble(r) {
   }).catch(() => {});
 }
 
-connect();
+checkAccess();

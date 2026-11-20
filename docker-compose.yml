@@ -1,6 +1,6 @@
 # ZeroPlay on a NAS. Paste this into your NAS's container manager (Portainer,
 # Synology Container Manager, Unraid, TrueNAS, ...) or run `docker compose up -d`
-# next to it. No need to download the source.
+# next to it. Everything else is set up on the page at http://<nas-address>:8080.
 
 services:
   zeroplay:
@@ -8,21 +8,9 @@ services:
     container_name: zeroplay
     restart: unless-stopped
     # Host networking lets players on the home network reach the video ports
-    # directly, and lets the playit agent see the server.
+    # directly, and lets the playit agent reach the server.
     network_mode: host
     volumes:
-      # The Microsoft sign-in is kept here. Change the left side to a folder on your NAS.
+      # Microsoft sign-in, password and playit link are kept here.
+      # Change the left side to a folder on your NAS.
       - ./zeroplay-data:/data
-    environment:
-      # Password for the web page (any user name). Set one before using playit.
-      ZEROPLAY_PASSWORD: ""
-      # Optional. Normally you link playit.gg with the "Remote access" button on the
-      # web page instead. Only set this if you already have an agent secret key.
-      PLAYIT_SECRET: ""
-      # Address of the web page.
-      ZEROPLAY_HTTP: "0.0.0.0:8080"
-      # UDP ports for video, one per connected player or watcher.
-      ZEROPLAY_RTC_PORTS: "50000-50009"
-      # Extra addresses players reach the video ports on, comma separated.
-      # For a playit UDP tunnel covering 50000-50009: "your-tunnel.ply.gg:12000"
-      ZEROPLAY_ANNOUNCE: ""

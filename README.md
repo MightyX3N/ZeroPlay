@@ -24,32 +24,22 @@ run `docker compose up -d`. It pulls the ready-made image
 `ghcr.io/mightyx3n/zeroplay:latest` (amd64 and arm64), so nothing is built on
 the NAS.
 
-Open `http://<nas-address>:8080`, press **Get a sign-in code** and enter the
-code at microsoft.com/link. The sign-in is kept in the `/data` folder.
+Open `http://<nas-address>:8080` from your home network:
 
-The image is rebuilt and published automatically on every push to `main`
-(about 5 minutes; see the *Docker image* workflow under *Actions*).
+1. Press **Get a sign-in code** and enter the code at microsoft.com/link.
+2. Choose a password. Everyone uses it to open ZeroPlay, at home and from
+   outside. It can only be set from the home network.
+3. For use outside your home, press the globe icon and open the playit.gg
+   claim link it shows. Once approved, ZeroPlay creates its playit tunnels
+   itself and shows the address to use.
 
-To build the image yourself instead: `docker build -t zeroplay .` and change
-`image:` in the compose file to `zeroplay`.
+Everything is kept in the `/data` folder. To reset the password, delete
+`access.json` there and set a new one from home.
 
-Settings (environment variables in the compose file):
+With a free playit account the video tunnel gets one port, so one player at a
+time can stream from outside the home; playit premium allows more.
 
-| Setting | What it does |
-| --- | --- |
-| `ZEROPLAY_PASSWORD` | Password for the web page (any user name). Set it before using playit. |
-| `PLAYIT_SECRET` | Optional playit.gg agent secret key. Normally you link playit with the **Remote access** button (globe icon) on the page instead: it shows a playit.gg claim link to approve. |
-| `ZEROPLAY_RTC_PORTS` | UDP ports for video, one per connected player or watcher. Default `50000-50009`. |
-| `ZEROPLAY_ANNOUNCE` | Extra addresses players reach the video ports on, comma separated. `host` keeps the same ports; `host:12000` means the first video port is public port 12000 and the rest follow in order. |
-| `ZEROPLAY_HTTP` | Address of the web page. Default `0.0.0.0:8080`. |
-
-For use outside the home network, press the globe icon on the page, open the
-claim link and approve it on playit.gg. Then add two tunnels to the agent on
-playit.gg: TCP for the
-web page (port 8080) and UDP for the video ports (50000-50009). Put the UDP
-tunnel's address in `ZEROPLAY_ANNOUNCE`.
-
-In the browser: controllers work as soon as they are plugged in, each in its
+In the browser: controllers work as soon as they are plugged in, as one
 console slot. All controllers, the keyboard and the mouse in one browser are
 one player, so you can switch between them; for couch co-op on one device,
 set *Controllers here* to *separate players* in the in-game menu. Keyboard and

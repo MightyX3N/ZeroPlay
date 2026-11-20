@@ -1,32 +1,22 @@
-//! Settings, read from environment variables.
+//! Settings, read from environment variables. All have defaults; none need
+//! setting for a normal NAS install.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, bail, Context, Result};
-
-/// An address players can reach the server's media ports on, besides the
-/// addresses of the machine itself.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Announce {
-    /// IP address or host name.
-    pub host: String,
-    /// Public port for the first media port. The rest follow in order. `None`
-    /// means the same port numbers as on the server.
-    pub first_port: Option<u16>,
-}
+use anyhow::{bail, Context, Result};
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Where the web page and the player connection listen.
+    /// The page for the home network.
     pub http_addr: SocketAddr,
-    /// Where the Microsoft sign-in is kept.
+    /// The page for visitors coming through the playit tunnel. Only on this
+    /// machine; the tunnel delivers here.
+    pub remote_addr: SocketAddr,
+    /// Where the Microsoft sign-in, the password and the playit key are kept.
     pub data_dir: PathBuf,
-    /// When set, the web page asks for this password.
-    pub password: Option<String>,
     /// UDP ports for the players' video. One per connected player or watcher.
     pub rtc_ports: Vec<u16>,
-    pub announce: Vec<Announce>,
 }
 
 impl Config {
@@ -36,15 +26,14 @@ impl Config {
             .unwrap_or_else(|| "0.0.0.0:8080".to_owned())
             .parse()
             .context("ZEROPLAY_HTTP must look like 0.0.0.0:8080")?;
+        let remote_addr = var("ZEROPLAY_REMOTE_HTTP")
+            .unwrap_or_else(|| "127.0.0.1:8081".to_owned())
+            .parse()
+            .context("ZEROPLAY_REMOTE_HTTP must look like 127.0.0.1:8081")?;
         let data_dir = PathBuf::from(var("ZEROPLAY_DATA").unwrap_or_else(|| "zeroplay-data".to_owned()));
-        let password = var("ZEROPLAY_PASSWORD");
         let rtc_ports = parse_ports(&var("ZEROPLAY_RTC_PORTS").unwrap_or_else(|| "50000-50009".to_owned()))
             .context("ZEROPLAY_RTC_PORTS must look like 50000-50009")?;
-        let announce = match var("ZEROPLAY_ANNOUNCE") {
-            Some(text) => parse_announce(&text).context("ZEROPLAY_ANNOUNCE must look like 192.168.1.10,example.playit.gg:12000")?,
-            None => Vec::new(),
-        };
-        Ok(Config { http_addr, data_dir, password, rtc_ports, announce })
+        Ok(Config { http_addr, remote_addr, data_dir, rtc_ports })
     }
 }
 
@@ -74,21 +63,6 @@ pub fn parse_ports(text: &str) -> Result<Vec<u16>> {
     Ok(ports)
 }
 
-/// `192.168.1.10,example.playit.gg:12000`.
-pub fn parse_announce(text: &str) -> Result<Vec<Announce>> {
-    text.split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|part| match part.rsplit_once(':') {
-            Some((host, port)) if !host.contains(':') => Ok(Announce {
-                host: host.to_owned(),
-                first_port: Some(port.parse().map_err(|_| anyhow!("{part}: bad port"))?),
-            }),
-            _ => Ok(Announce { host: part.to_owned(), first_port: None }),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,17 +74,5 @@ mod tests {
         assert!(parse_ports("50002-50000").is_err());
         assert!(parse_ports("").is_err());
         assert!(parse_ports("0").is_err());
-    }
-
-    #[test]
-    fn announce_with_and_without_port() {
-        assert_eq!(
-            parse_announce("192.168.1.10, abc.playit.gg:12000").unwrap(),
-            vec![
-                Announce { host: "192.168.1.10".to_owned(), first_port: None },
-                Announce { host: "abc.playit.gg".to_owned(), first_port: Some(12000) },
-            ]
-        );
-        assert!(parse_announce("host:nope").is_err());
     }
 }

@@ -4,27 +4,29 @@
 //! console and passes it on to every player's browser. Players' controllers
 //! each get a console slot.
 
+mod access;
 mod app;
 mod config;
 mod playit;
 mod sdp;
 mod viewer;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::Router;
-use base64::Engine;
+use axum::routing::{get, post};
+use axum::{Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use serde_json::json;
 use zeroplay_xbox::input::{GamepadState, KeyboardFrame, MouseFrame};
 
+use access::{at_home, Door, Verdict};
 use app::{App, Direct};
 use config::Config;
 use viewer::ViewerPeer;
@@ -43,61 +45,122 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let config = Config::from_env()?;
-    let addr = config.http_addr;
+    let home_addr = config.http_addr;
+    let remote_addr = config.remote_addr;
     let app = App::new(config).await?;
-    println!("ZeroPlay server on http://{addr}");
-    println!("Sign-in is kept in {}", app.config.data_dir.display());
-    if app.config.password.is_none() {
-        println!("Warning: no ZEROPLAY_PASSWORD set. Anyone who can reach this page can use your console.");
-    }
+    println!("ZeroPlay server on http://{home_addr}");
+    println!("Data is kept in {}", app.config.data_dir.display());
 
-    let router = Router::new()
+    let home = tokio::net::TcpListener::bind(home_addr).await?;
+    let remote = tokio::net::TcpListener::bind(remote_addr).await?;
+    let serve = |listener: tokio::net::TcpListener, door: Door| {
+        let router = router(app.clone(), door).into_make_service_with_connect_info::<SocketAddr>();
+        let app = app.clone();
+        async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = tokio::signal::ctrl_c().await;
+                    if door == Door::Home {
+                        println!("Stopping.");
+                        app.stop().await;
+                    }
+                })
+                .await
+        }
+    };
+    let (a, b) = tokio::join!(serve(home, Door::Home), serve(remote, Door::Remote));
+    a?;
+    b?;
+    Ok(())
+}
+
+fn router(app: Arc<App>, door: Door) -> Router {
+    Router::new()
         .route("/", get(|| async { page(INDEX_HTML, "text/html; charset=utf-8") }))
         .route("/app.js", get(|| async { page(APP_JS, "text/javascript; charset=utf-8") }))
         .route("/style.css", get(|| async { page(STYLE_CSS, "text/css; charset=utf-8") }))
+        .route("/api/access", get(access_state))
+        .route("/api/password", post(set_password))
+        .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
         .route("/ws", get(ws_upgrade))
-        .layer(middleware::from_fn_with_state(app.clone(), password_check))
-        .with_state(app.clone());
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            println!("Stopping.");
-            app.stop().await;
-        })
-        .await?;
-    Ok(())
+        .layer(Extension(door))
+        .with_state(app)
 }
 
 fn page(body: &'static str, content_type: &'static str) -> Response {
     ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body).into_response()
 }
 
-/// When ZEROPLAY_PASSWORD is set, the browser asks for it (any user name).
-async fn password_check(State(app): State<Arc<App>>, headers: HeaderMap, request: Request, next: Next) -> Response {
-    let Some(password) = &app.config.password else {
-        return next.run(request).await;
+/// What the page should show: the app, a login, or "set up at home first".
+async fn access_state(
+    State(app): State<Arc<App>>,
+    Extension(door): Extension<Door>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let verdict = app.access.verdict(door, peer, &headers);
+    Json(json!({ "verdict": verdict, "home": at_home(door, peer), "passwordSet": app.access.has_password() })).into_response()
+}
+
+#[derive(Deserialize)]
+struct PasswordForm {
+    password: String,
+}
+
+fn with_cookie(cookie: String) -> Response {
+    ([(header::SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response()
+}
+
+fn refused(message: impl std::fmt::Display) -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": message.to_string() }))).into_response()
+}
+
+async fn set_password(
+    State(app): State<Arc<App>>,
+    Extension(door): Extension<Door>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(form): Json<PasswordForm>,
+) -> Response {
+    let result = if app.access.has_password() {
+        app.access.change_password(door, peer, &headers, &form.password).await
+    } else {
+        app.access.set_password(door, peer, &form.password).await
     };
-    if password_matches(&headers, password) {
-        return next.run(request).await;
+    match result {
+        Ok(token) => {
+            app.changed();
+            with_cookie(access::session_cookie(&token))
+        }
+        Err(error) => refused(format!("{error:#}")),
     }
-    (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Basic realm=\"ZeroPlay\", charset=\"UTF-8\"")], "Password needed")
-        .into_response()
 }
 
-fn password_matches(headers: &HeaderMap, password: &str) -> bool {
-    let Some(value) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else { return false };
-    let Some(encoded) = value.strip_prefix("Basic ") else { return false };
-    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded.trim()) else { return false };
-    let Ok(text) = String::from_utf8(decoded) else { return false };
-    let given = text.split_once(':').map(|(_, p)| p).unwrap_or("");
-    // Compare every byte so the time taken does not give the password away.
-    given.len() == password.len() && given.bytes().zip(password.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+async fn login(State(app): State<Arc<App>>, Json(form): Json<PasswordForm>) -> Response {
+    match app.access.login(&form.password).await {
+        Ok(token) => with_cookie(access::session_cookie(&token)),
+        Err(error) => refused(format!("{error:#}")),
+    }
 }
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> Response {
-    ws.on_upgrade(move |socket| client(app, socket))
+async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    app.access.logout(&headers).await;
+    with_cookie(access::clear_cookie())
+}
+
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(app): State<Arc<App>>,
+    Extension(door): Extension<Door>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if app.access.verdict(door, peer, &headers) != Verdict::Ok {
+        return (StatusCode::UNAUTHORIZED, "Log in first").into_response();
+    }
+    let home = at_home(door, peer);
+    ws.on_upgrade(move |socket| client(app, socket, home))
 }
 
 /// Messages from the page.
@@ -122,8 +185,8 @@ enum FromPage {
     PlayitDisconnect,
 }
 
-async fn client(app: Arc<App>, socket: WebSocket) {
-    let (id, mut direct) = app.add_viewer();
+async fn client(app: Arc<App>, socket: WebSocket, home: bool) {
+    let (id, mut direct) = app.add_viewer(home);
     let (mut sink, mut stream) = socket.split();
     let mut updates = app.subscribe_updates();
     let mut peer: Option<ViewerPeer> = None;
@@ -135,7 +198,7 @@ async fn client(app: Arc<App>, socket: WebSocket) {
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<FromPage>(&text) {
                         Ok(message) => {
-                            if let Some(reply) = handle(&app, id, message, &mut peer).await {
+                            if let Some(reply) = handle(&app, id, home, message, &mut peer).await {
                                 send_ok = sink.send(Message::Text(serde_json::to_string(&reply).unwrap_or_default().into())).await.is_ok();
                             }
                         }
@@ -167,7 +230,7 @@ fn error(message: impl std::fmt::Display) -> Option<Direct> {
     Some(Direct::Error { message: message.to_string() })
 }
 
-async fn handle(app: &Arc<App>, id: u64, message: FromPage, peer: &mut Option<ViewerPeer>) -> Option<Direct> {
+async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &mut Option<ViewerPeer>) -> Option<Direct> {
     match message {
         FromPage::Name { name } => app.set_name(id, &name),
         FromPage::Login => app.login().await,
@@ -226,6 +289,9 @@ async fn handle(app: &Arc<App>, id: u64, message: FromPage, peer: &mut Option<Vi
             app.send_mouse(MouseFrame { x: dx, y: dy, wheel_y: wheel, buttons, ..Default::default() })
         }
         FromPage::Keyframe => app.request_keyframe(),
+        FromPage::PlayitConnect | FromPage::PlayitDisconnect if !home => {
+            return error("Remote access can only be changed from your home network.");
+        }
         FromPage::PlayitConnect => app.playit.connect(),
         FromPage::PlayitDisconnect => app.playit.disconnect().await,
     }
@@ -235,23 +301,6 @@ async fn handle(app: &Arc<App>, id: u64, message: FromPage, peer: &mut Option<Vi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
-
-    fn basic(user_pass: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(user_pass);
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_str(&format!("Basic {encoded}")).unwrap());
-        headers
-    }
-
-    #[test]
-    fn password_is_checked_and_user_name_ignored() {
-        assert!(password_matches(&basic("anyone:secret"), "secret"));
-        assert!(password_matches(&basic(":secret"), "secret"));
-        assert!(!password_matches(&basic("anyone:secre"), "secret"));
-        assert!(!password_matches(&basic("anyone:wrong!"), "secret"));
-        assert!(!password_matches(&HeaderMap::new(), "secret"));
-    }
 
     #[test]
     fn page_messages_parse() {

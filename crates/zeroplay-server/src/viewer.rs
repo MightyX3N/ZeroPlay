@@ -103,28 +103,21 @@ fn track(kind: RtpCodecKind, ssrc: u32, codec: RTCRtpCodec) -> Arc<TrackLocalSta
     )))
 }
 
-/// The addresses this player's media port is also reachable on.
-async fn announced_candidates(app: &App, port: u16) -> Vec<(IpAddr, u16)> {
-    let index = app.config.rtc_ports.iter().position(|p| *p == port).unwrap_or(0) as u16;
-    let mut out = Vec::new();
-    for announce in &app.config.announce {
-        let public_port = match announce.first_port {
-            Some(first) => first.saturating_add(index),
-            None => port,
-        };
-        match announce.host.parse::<IpAddr>() {
-            Ok(ip) => out.push((ip, public_port)),
-            Err(_) => match tokio::net::lookup_host((announce.host.as_str(), public_port)).await {
-                Ok(addrs) => {
-                    if let Some(addr) = addrs.into_iter().find(|a| a.is_ipv4()) {
-                        out.push((addr.ip(), public_port));
-                    }
-                }
-                Err(error) => println!("could not look up {}: {error}", announce.host),
-            },
+/// The playit tunnel address of this player's media port, if the tunnel covers it.
+async fn tunnel_candidates(app: &App, port: u16) -> Vec<(IpAddr, u16)> {
+    let index = app.config.rtc_ports.iter().position(|p| *p == port).unwrap_or(0);
+    let Some((host, public_port)) = app.playit.video_address(index) else { return Vec::new() };
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return vec![(ip, public_port)];
+    }
+    let found = tokio::net::lookup_host(format!("{host}:{public_port}")).await;
+    match found {
+        Ok(addrs) => addrs.filter(|a| a.is_ipv4()).map(|a| (a.ip(), public_port)).take(1).collect(),
+        Err(error) => {
+            println!("could not look up {host}: {error}");
+            Vec::new()
         }
     }
-    out
 }
 
 /// Answers a browser's offer and starts passing the stream on to it.
@@ -191,7 +184,7 @@ async fn build(app: &Arc<App>, offer_sdp: String, codecs: &BrowserCodecs, port: 
             return Err(error);
         }
     };
-    let answer = add_candidates(&answer, &announced_candidates(app, port).await);
+    let answer = add_candidates(&answer, &tunnel_candidates(app, port).await);
 
     let forwarder = tokio::spawn(forward(
         app.clone(),
@@ -303,10 +296,9 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("zeroplay-test-{}", uuid::Uuid::new_v4()));
         let config = Config {
             http_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: "127.0.0.1:0".parse().unwrap(),
             data_dir: data_dir.clone(),
-            password: None,
             rtc_ports: vec![0],
-            announce: Vec::new(),
         };
         let app = App::new(config).await.unwrap();
 
