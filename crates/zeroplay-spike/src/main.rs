@@ -182,7 +182,7 @@ async fn stream(
     let api = HomeApi::new(&token)?;
     let signaling = start_home_session(&api, auth, &console.id, &|line| println!("  {line}")).await?;
     println!("Connecting to the console...");
-    let options = StreamOptions { video_path: Some(video.clone()), audio_path: Some(audio.clone()) };
+    let options = StreamOptions { video_path: Some(video.clone()), audio_path: Some(audio.clone()), ..Default::default() };
     let signaling = Arc::new(signaling);
     let mut session = match Session::connect(signaling.clone(), options).await {
         Ok(session) => session,

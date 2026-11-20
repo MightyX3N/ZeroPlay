@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zeroplay-xbox", "crates/zeroplay-spike"]
+members = ["crates/zeroplay-xbox", "crates/zeroplay-spike", "crates/zeroplay-server"]
 
 [workspace.package]
 version = "0.0.1"

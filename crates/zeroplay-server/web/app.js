@@ -1,0 +1,536 @@
+"use strict";
+
+// ── Small helpers ────────────────────────────────────────────────────────────
+
+const $ = (id) => document.getElementById(id);
+const show = (el, on) => el.classList.toggle("hidden", !on);
+const screens = ["home", "signin", "waking", "stream"];
+function showScreen(name) {
+  for (const s of screens) show($(s), s === name);
+}
+
+let toastTimer = 0;
+function toast(message, info) {
+  const el = $("toast");
+  el.textContent = message;
+  el.classList.toggle("info", !!info);
+  show(el, true);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => show(el, false), 6000);
+}
+
+// Xbox button bits (same as the server's).
+const BTN = {
+  nexus: 2, menu: 4, view: 8, a: 16, b: 32, x: 64, y: 128,
+  up: 256, down: 512, left: 1024, right: 2048, lb: 4096, rb: 8192, ls: 16384, rs: 32768,
+};
+// Browser "standard" gamepad layout, button index → Xbox bit.
+const STANDARD = [BTN.a, BTN.b, BTN.x, BTN.y, BTN.lb, BTN.rb, 0, 0, BTN.view, BTN.menu, BTN.ls, BTN.rs,
+  BTN.up, BTN.down, BTN.left, BTN.right, BTN.nexus];
+const KEYBOARD_LOCAL = 9;
+
+// ── Connection to the server ────────────────────────────────────────────────
+
+let ws = null;
+let status = null;
+let lastError = "";
+
+function send(message) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => {
+    const name = localStorage.getItem("zp-name");
+    if (name) send({ t: "name", name });
+  };
+  ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.t === "status") onStatus(message);
+    else if (message.t === "answer") onAnswer(message.sdp);
+    else if (message.t === "rumble") onRumble(message);
+    else if (message.t === "error") toast(message.message);
+  };
+  ws.onclose = () => {
+    $("console-info").textContent = "Lost the connection to the server, retrying…";
+    stopWatching();
+    setTimeout(connect, 2000);
+  };
+}
+
+// ── What the server tells us ────────────────────────────────────────────────
+
+let selected = null;
+let wantWatch = false;
+
+function onStatus(s) {
+  status = s;
+  const stream = s.stream;
+  if (stream.state === "failed" && stream.error !== lastError) toast(stream.error);
+  lastError = stream.state === "failed" ? stream.error : "";
+
+  if (!s.signedIn) {
+    stopWatching();
+    renderSignin(s);
+    showScreen("signin");
+    return;
+  }
+  if (stream.state === "starting") {
+    renderWaking(stream);
+    if (!watching()) showScreen("waking");
+    return;
+  }
+  if (stream.state === "live" && wantWatch) {
+    if (!watching()) startWatching();
+    renderMenu();
+    showScreen("stream");
+    return;
+  }
+  if (stream.state !== "live") {
+    stopWatching();
+    wantWatch = false;
+  }
+  renderHome(s);
+  showScreen("home");
+}
+
+function renderSignin(s) {
+  show($("signin-start"), !s.login);
+  show($("signin-code"), !!s.login);
+  if (s.login) {
+    $("signin-value").textContent = s.login.code;
+    $("signin-link").href = s.login.uri;
+    $("signin-link").textContent = s.login.uri.replace(/^https?:\/\//, "");
+  }
+  show($("signin-error"), !!s.loginError);
+  $("signin-error").textContent = s.loginError || "";
+}
+
+const STEPS = ["Waking console", "Starting stream", "Authorizing", "Connecting"];
+function renderWaking(stream) {
+  $("waking-title").textContent = stream.consoleName;
+  $("waking-step").textContent = `${stream.step}…`;
+  const now = Math.max(0, STEPS.indexOf(stream.step));
+  $("waking-steps").replaceChildren(...STEPS.map((step, i) => {
+    const li = document.createElement("li");
+    li.textContent = step;
+    li.className = i < now ? "done" : i === now ? "now" : "";
+    return li;
+  }));
+}
+
+function powerText(power) {
+  if (power === "On") return "On";
+  if (power === "ConnectedStandby") return "Asleep";
+  return power || "Unknown";
+}
+
+function renderHome(s) {
+  const consoles = s.consoles || [];
+  if (!consoles.find((c) => c.id === selected)) {
+    const live = s.stream.state === "live" && s.stream.consoleId;
+    selected = live || (consoles.find((c) => c.remotePlay) || consoles[0] || {}).id || null;
+  }
+  const current = consoles.find((c) => c.id === selected);
+  const live = s.stream.state === "live";
+  const liveHere = live && s.stream.consoleId === selected;
+
+  $("console-name").textContent = current ? current.name : "No console";
+  $("console-info").textContent = live
+    ? `Streaming ${s.stream.consoleName} · ${s.players.length} playing`
+    : current ? `${powerText(current.power)} · ${current.type}` : (s.consoleError || "No consoles found on this account");
+  $("power-dot").className = "dot " + (current && current.power === "On" ? "on" : current && current.power === "ConnectedStandby" ? "standby" : "");
+
+  $("hero-label").textContent = liveHere ? "Streaming now" : "Your console";
+  $("hero-title").textContent = current ? current.name : "No console found";
+  $("hero-meta").textContent = current
+    ? `${current.type} · ${powerText(current.power)} · Remote play ${current.remotePlay ? "on" : "OFF – turn on remote features on the console"}`
+    : "Turn on remote features on your Xbox, then press refresh.";
+  $("btn-play-label").textContent = liveHere ? "Join stream" : "Play";
+  $("btn-play").disabled = !current || (live && !liveHere);
+  show($("btn-wake"), !!current && current.power !== "On" && !liveHere);
+  show($("btn-stop"), live);
+
+  $("shelf-count").textContent = `${consoles.length} console${consoles.length === 1 ? "" : "s"}`;
+  $("tiles").replaceChildren(...consoles.map((c) => {
+    const tile = document.createElement("button");
+    tile.className = "tile" + (c.id === selected ? " selected" : "");
+    tile.setAttribute("aria-label", c.name);
+    const label = document.createElement("span");
+    label.className = "label";
+    const name = document.createElement("b");
+    name.textContent = c.name;
+    label.append(name, `${powerText(c.power)}${s.stream.consoleId === c.id && live ? " · streaming" : ""}`);
+    tile.append(label);
+    tile.onclick = () => { selected = c.id; renderHome(status); };
+    return tile;
+  }));
+
+  renderPlayers(s);
+}
+
+function renderPlayers(s) {
+  const chips = s.players.map((p) => {
+    const chip = document.createElement("div");
+    chip.className = "player";
+    const badge = document.createElement("span");
+    badge.className = `badge p${p.slot}`;
+    badge.textContent = `P${p.slot}`;
+    chip.append(badge, p.you ? `${p.name} (you)` : p.name);
+    return chip;
+  });
+  if (s.watching.length) {
+    const chip = document.createElement("div");
+    chip.className = "player";
+    const badge = document.createElement("span");
+    badge.className = "badge watch";
+    badge.textContent = s.watching.length;
+    chip.append(badge, "watching");
+    chips.push(chip);
+  }
+  $("players").replaceChildren(...chips);
+}
+
+// ── Buttons ──────────────────────────────────────────────────────────────────
+
+$("btn-login").onclick = () => send({ t: "login" });
+$("btn-signout").onclick = () => { if (confirmSignOut()) send({ t: "logout" }); };
+$("btn-refresh").onclick = () => send({ t: "refresh" });
+$("btn-wake").onclick = () => { if (selected) { send({ t: "wake", id: selected }); toast("Asked the console to wake up.", true); } };
+$("btn-stop").onclick = () => send({ t: "stop" });
+$("btn-cancel").onclick = () => send({ t: "stop" });
+$("btn-play").onclick = play;
+
+function confirmSignOut() {
+  return window.confirm("Sign this server out of your Microsoft account?");
+}
+
+function play() {
+  if (!status || !selected) return;
+  wantWatch = true;
+  if (status.stream.state === "live") onStatus(status);
+  else send({ t: "start", id: selected });
+}
+
+// ── Video ────────────────────────────────────────────────────────────────────
+
+let pc = null;
+let lastFrames = -1;
+let stalled = 0;
+let lastBytes = 0;
+let lastStatsAt = 0;
+
+function watching() { return pc !== null; }
+
+async function startWatching() {
+  pc = new RTCPeerConnection();
+  const mine = pc;
+  const media = new MediaStream();
+  pc.ontrack = (event) => {
+    media.addTrack(event.track);
+    const video = $("video");
+    if (video.srcObject !== media) video.srcObject = media;
+    video.play().catch(() => {
+      video.muted = true;
+      video.play().catch(() => {});
+      show($("tap-to-play"), true);
+    });
+  };
+  pc.onconnectionstatechange = () => {
+    if (mine.connectionState === "failed") toast("The video connection failed. Check the media ports (ZEROPLAY_RTC_PORTS) are reachable.");
+  };
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.addTransceiver("audio", { direction: "recvonly" });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await new Promise((resolve) => {
+    if (mine.iceGatheringState === "complete") return resolve();
+    const timer = setTimeout(resolve, 2000);
+    mine.addEventListener("icegatheringstatechange", () => {
+      if (mine.iceGatheringState === "complete") { clearTimeout(timer); resolve(); }
+    });
+  });
+  if (pc !== mine) return;
+  send({ t: "offer", sdp: pc.localDescription.sdp });
+  lastFrames = -1;
+  stalled = 0;
+}
+
+async function onAnswer(sdp) {
+  if (!pc) return;
+  try {
+    await pc.setRemoteDescription({ type: "answer", sdp });
+  } catch (error) {
+    toast(`Could not start the video: ${error.message}`);
+  }
+}
+
+function stopWatching() {
+  if (pc) {
+    pc.close();
+    pc = null;
+    send({ t: "leave" });
+  }
+  $("video").srcObject = null;
+  closeMenu();
+  unplugAll();
+}
+
+$("btn-unmute").onclick = () => {
+  const video = $("video");
+  video.muted = false;
+  video.play().catch(() => {});
+  show($("tap-to-play"), false);
+};
+
+// Ask for a fresh picture if the video stops moving, and keep the stats up to date.
+setInterval(async () => {
+  if (!pc) return;
+  const report = await pc.getStats();
+  report.forEach((r) => {
+    if (r.type !== "inbound-rtp" || r.kind !== "video") return;
+    const frames = r.framesDecoded || 0;
+    if (status && status.stream.state === "live" && frames === lastFrames) {
+      stalled++;
+      if (stalled >= 2) { send({ t: "keyframe" }); stalled = 0; }
+    } else {
+      stalled = 0;
+    }
+    lastFrames = frames;
+    const now = performance.now();
+    const mbps = lastStatsAt ? ((r.bytesReceived - lastBytes) * 8) / ((now - lastStatsAt) * 1000) : 0;
+    lastBytes = r.bytesReceived;
+    lastStatsAt = now;
+    const parts = [];
+    if (r.frameHeight) parts.push(`${r.frameHeight}p`);
+    if (r.framesPerSecond) parts.push(`${Math.round(r.framesPerSecond)} fps`);
+    parts.push(`${mbps.toFixed(1)} Mbps`);
+    $("stats").replaceChildren(...parts.map((p) => { const s = document.createElement("span"); s.textContent = p; return s; }));
+  });
+}, 1000);
+
+// ── Menu (F1, or hold View + Menu) ──────────────────────────────────────────
+
+let menuOpen = false;
+let menuIndex = 0;
+let keyboardOn = localStorage.getItem("zp-keyboard") === "on";
+let statsOn = localStorage.getItem("zp-stats") === "on";
+const menuItems = () => [...document.querySelectorAll("#menu .menu-item")];
+
+function renderMenu() {
+  if (!status) return;
+  $("menu-title").textContent = status.stream.consoleName || "Xbox";
+  const n = status.players.length;
+  $("menu-players").textContent = `${n} playing · ${status.watching.length} watching`;
+  $("m-keyboard").textContent = `Keyboard controls: ${keyboardOn ? "on" : "off"}`;
+  $("m-stats").textContent = statsOn ? "Hide stats" : "Show stats";
+  show($("stats"), statsOn);
+  menuItems().forEach((el, i) => el.classList.toggle("active", i === menuIndex));
+}
+
+function openMenu() {
+  menuOpen = true;
+  menuIndex = 0;
+  releaseAll();
+  renderMenu();
+  show($("menu"), true);
+}
+
+function closeMenu() {
+  menuOpen = false;
+  show($("menu"), false);
+}
+
+$("m-resume").onclick = closeMenu;
+$("m-keyboard").onclick = () => {
+  keyboardOn = !keyboardOn;
+  localStorage.setItem("zp-keyboard", keyboardOn ? "on" : "off");
+  if (!keyboardOn) send({ t: "unplug", local: KEYBOARD_LOCAL });
+  renderMenu();
+};
+$("m-fullscreen").onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+  closeMenu();
+};
+$("m-stats").onclick = () => {
+  statsOn = !statsOn;
+  localStorage.setItem("zp-stats", statsOn ? "on" : "off");
+  renderMenu();
+};
+$("m-home").onclick = () => { wantWatch = false; stopWatching(); onStatus(status); };
+$("m-end").onclick = () => { wantWatch = false; send({ t: "stop" }); };
+
+// ── Controllers ──────────────────────────────────────────────────────────────
+
+const sent = new Map(); // local index → { key, at }
+let comboSince = 0;
+let prevButtons = new Map(); // local index → bits, for menu and home navigation
+
+function padState(gp) {
+  let buttons = 0;
+  const standard = gp.mapping === "standard";
+  gp.buttons.forEach((b, i) => {
+    if (b.pressed && standard && STANDARD[i]) buttons |= STANDARD[i];
+  });
+  const axis = (i) => {
+    const v = gp.axes[i] || 0;
+    return Math.abs(v) < 0.08 ? 0 : v;
+  };
+  return {
+    buttons,
+    lx: axis(0), ly: -axis(1), rx: axis(2), ry: -axis(3),
+    lt: gp.buttons[6] ? gp.buttons[6].value : 0,
+    rt: gp.buttons[7] ? gp.buttons[7].value : 0,
+  };
+}
+
+function sendPad(local, state) {
+  const key = JSON.stringify(state);
+  const last = sent.get(local);
+  const now = performance.now();
+  if (last && last.key === key && now - last.at < 250) return;
+  sent.set(local, { key, at: now });
+  send({ t: "pad", local, ...state });
+}
+
+function neutral() {
+  return { buttons: 0, lx: 0, ly: 0, rx: 0, ry: 0, lt: 0, rt: 0 };
+}
+
+function releaseAll() {
+  for (const local of sent.keys()) sendPad(local, neutral());
+}
+
+function unplugAll() {
+  for (const local of sent.keys()) send({ t: "unplug", local });
+  sent.clear();
+}
+
+function pressed(local, bits, bit) {
+  const before = prevButtons.get(local) || 0;
+  return (bits & bit) && !(before & bit);
+}
+
+function navigate(bits, local) {
+  const onHome = !$("home").classList.contains("hidden");
+  if (menuOpen) {
+    const items = menuItems();
+    if (pressed(local, bits, BTN.down)) menuIndex = (menuIndex + 1) % items.length;
+    if (pressed(local, bits, BTN.up)) menuIndex = (menuIndex + items.length - 1) % items.length;
+    if (pressed(local, bits, BTN.a)) items[menuIndex].click();
+    if (pressed(local, bits, BTN.b)) closeMenu();
+    if (menuOpen) renderMenu();
+  } else if (onHome && status) {
+    const ids = (status.consoles || []).map((c) => c.id);
+    const i = ids.indexOf(selected);
+    if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selected = ids[i + 1]; renderHome(status); }
+    if (pressed(local, bits, BTN.left) && i > 0) { selected = ids[i - 1]; renderHome(status); }
+    if (pressed(local, bits, BTN.a)) play();
+  }
+}
+
+function pollPads() {
+  const inStream = pc !== null && !$("stream").classList.contains("hidden");
+  const seen = new Set();
+  let combo = false;
+  for (const gp of navigator.getGamepads ? navigator.getGamepads() : []) {
+    if (!gp || !gp.connected) continue;
+    const local = gp.index;
+    seen.add(local);
+    const state = padState(gp);
+    if ((state.buttons & BTN.view) && (state.buttons & BTN.menu)) combo = true;
+    if (inStream && !menuOpen) sendPad(local, state);
+    else navigate(state.buttons, local);
+    prevButtons.set(local, state.buttons);
+  }
+  // Holding View + Menu for 0.8 s opens or closes the menu.
+  if (combo && inStream) {
+    if (!comboSince) comboSince = performance.now();
+    else if (performance.now() - comboSince > 800 && comboSince !== -1) {
+      comboSince = -1;
+      if (menuOpen) closeMenu(); else openMenu();
+    }
+  } else {
+    comboSince = 0;
+  }
+  // Controllers that went away are unplugged on the console too.
+  for (const local of [...sent.keys()]) {
+    if (local !== KEYBOARD_LOCAL && !seen.has(local)) {
+      send({ t: "unplug", local });
+      sent.delete(local);
+    }
+  }
+  if (inStream && !menuOpen && keyboardOn && keysDown.size) sendPad(KEYBOARD_LOCAL, keyboardState());
+}
+setInterval(pollPads, 8);
+
+// ── Keyboard as a controller (fixed layout for now) ─────────────────────────
+
+const KEY_BUTTONS = {
+  Space: BTN.a, KeyB: BTN.b, Backspace: BTN.b, KeyX: BTN.x, KeyY: BTN.y,
+  KeyQ: BTN.lb, KeyE: BTN.rb, Tab: BTN.view, Enter: BTN.menu, KeyH: BTN.nexus,
+  KeyF: BTN.ls, KeyG: BTN.rs,
+  ArrowUp: BTN.up, ArrowDown: BTN.down, ArrowLeft: BTN.left, ArrowRight: BTN.right,
+};
+const KEY_OTHER = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "KeyI", "KeyJ", "KeyK", "KeyL", "KeyZ", "KeyC"]);
+const keysDown = new Set();
+
+function keyboardState() {
+  const k = (code) => (keysDown.has(code) ? 1 : 0);
+  let buttons = 0;
+  for (const code of keysDown) buttons |= KEY_BUTTONS[code] || 0;
+  return {
+    buttons,
+    lx: k("KeyD") - k("KeyA"), ly: k("KeyW") - k("KeyS"),
+    rx: k("KeyL") - k("KeyJ"), ry: k("KeyI") - k("KeyK"),
+    lt: k("KeyZ"), rt: k("KeyC"),
+  };
+}
+
+window.addEventListener("keydown", (event) => {
+  const inStream = !$("stream").classList.contains("hidden");
+  if (!inStream) return;
+  if (event.code === "F1" || event.code === "Escape") {
+    event.preventDefault();
+    if (menuOpen) closeMenu(); else openMenu();
+    return;
+  }
+  if (menuOpen || !keyboardOn) return;
+  if (KEY_BUTTONS[event.code] !== undefined || KEY_OTHER.has(event.code)) {
+    event.preventDefault();
+    keysDown.add(event.code);
+    sendPad(KEYBOARD_LOCAL, keyboardState());
+  }
+});
+
+window.addEventListener("keyup", (event) => {
+  if (!keysDown.delete(event.code)) return;
+  event.preventDefault();
+  sendPad(KEYBOARD_LOCAL, keyboardState());
+});
+
+window.addEventListener("blur", () => {
+  if (keysDown.size) {
+    keysDown.clear();
+    sendPad(KEYBOARD_LOCAL, keyboardState());
+  }
+});
+
+// ── Rumble ───────────────────────────────────────────────────────────────────
+
+function onRumble(r) {
+  const gp = (navigator.getGamepads ? navigator.getGamepads() : [])[r.local];
+  if (!gp || !gp.vibrationActuator || !r.ms) return;
+  gp.vibrationActuator.playEffect("dual-rumble", {
+    duration: r.ms,
+    strongMagnitude: Math.min(1, r.left),
+    weakMagnitude: Math.min(1, r.right),
+    leftTrigger: Math.min(1, r.leftTrigger),
+    rightTrigger: Math.min(1, r.rightTrigger),
+  }).catch(() => {});
+}
+
+connect();
