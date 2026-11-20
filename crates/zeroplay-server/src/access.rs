@@ -47,6 +47,46 @@ pub enum Quality {
     Low,
 }
 
+impl Quality {
+    /// Higher is better.
+    fn rank(self) -> u8 {
+        match self {
+            Quality::Max => 3,
+            Quality::High => 2,
+            Quality::Medium => 1,
+            Quality::Low => 0,
+        }
+    }
+
+    /// The lower of the two.
+    pub fn min(self, other: Quality) -> Quality {
+        if other.rank() < self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    pub fn allows(self, wanted: Quality) -> bool {
+        wanted.rank() <= self.rank()
+    }
+
+    /// 720p instead of 1080p.
+    pub fn is_720p(self) -> bool {
+        matches!(self, Quality::Medium | Quality::Low)
+    }
+
+    /// The video bitrate asked of the console, in kbit/s (`None` = as much as it sends).
+    pub fn max_video_kbps(self) -> Option<u32> {
+        match self {
+            Quality::Max => None,
+            Quality::High => Some(12_000),
+            Quality::Medium => Some(6_000),
+            Quality::Low => Some(2_500),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -107,6 +147,10 @@ pub struct Settings {
     pub timed_play: bool,
     #[serde(default = "thirty")]
     pub turn_minutes: u32,
+    /// The stream quality everyone shares (lowered to the lowest profile limit
+    /// among the people watching).
+    #[serde(default)]
+    pub quality: Quality,
 }
 
 fn thirty() -> u32 {
@@ -119,6 +163,7 @@ impl Default for Settings {
             allow_requests: false,
             timed_play: false,
             turn_minutes: 30,
+            quality: Quality::Max,
         }
     }
 }
@@ -388,6 +433,11 @@ impl Access {
             stored.settings.timed_play = enabled;
             stored.settings.turn_minutes = minutes;
         }
+        self.save().await
+    }
+
+    pub async fn set_quality(&self, quality: Quality) -> Result<()> {
+        self.stored.lock().unwrap().settings.quality = quality;
         self.save().await
     }
 

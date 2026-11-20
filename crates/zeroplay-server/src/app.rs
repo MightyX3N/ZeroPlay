@@ -1,7 +1,7 @@
 //! Everything the server keeps track of: the Microsoft sign-in, the consoles,
 //! the one stream from the console, and who holds which controller slot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use zeroplay_xbox::session::{
     start_home_session, MediaPacket, Session, SessionEvent, StreamOptions,
 };
 
-use crate::access::{Access, Profile};
+use crate::access::{Access, Profile, Quality};
 use crate::config::Config;
 use crate::control::{Effect, Rules, Seats};
 use crate::playit::Playit;
@@ -95,6 +95,10 @@ struct Inner {
     seats: Seats,
     free_ports: Vec<u16>,
     last_keyframe: Option<Instant>,
+    /// Players with the stream on screen.
+    watchers: HashSet<u64>,
+    /// The quality the running stream was started with.
+    stream_quality: Option<Quality>,
 }
 
 pub struct App {
@@ -148,6 +152,8 @@ impl App {
                 seats: Seats::default(),
                 free_ports,
                 last_keyframe: None,
+                watchers: HashSet::new(),
+                stream_quality: None,
             }),
             session: Mutex::new(None),
             generation: AtomicU64::new(0),
@@ -209,9 +215,10 @@ impl App {
 
     /// A player's connection is gone. With a stream running their controllers
     /// are unplugged (games pause) and their slot is held for a minute.
-    pub async fn remove_viewer(&self, id: u64) {
+    pub async fn remove_viewer(self: &Arc<Self>, id: u64) {
         let effects = {
             let mut inner = self.inner.lock().unwrap();
+            inner.watchers.remove(&id);
             let profile = inner
                 .viewers
                 .remove(&id)
@@ -227,28 +234,127 @@ impl App {
         };
         self.apply(effects).await;
         self.changed();
+        self.match_quality();
     }
 
     /// The player started watching the stream.
-    pub fn start_watching(&self, id: u64) {
-        self.inner
-            .lock()
-            .unwrap()
-            .seats
-            .start_watching(id, Instant::now());
+    pub fn start_watching(self: &Arc<Self>, id: u64) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.seats.start_watching(id, Instant::now());
+            inner.watchers.insert(id);
+        }
         self.changed();
+        self.match_quality();
+    }
+
+    // ── Shared quality ─────────────────────────────────────────────────────
+
+    /// The quality the stream should run at: the shared setting, lowered to
+    /// the lowest limit among the people watching (or, before anyone watches,
+    /// among everyone connected).
+    fn wanted_quality(&self) -> Quality {
+        let setting = self.access.settings().quality;
+        let profiles: Vec<String> = {
+            let inner = self.inner.lock().unwrap();
+            let ids: Vec<u64> = if inner.watchers.is_empty() {
+                inner.viewers.keys().copied().collect()
+            } else {
+                inner.watchers.iter().copied().collect()
+            };
+            ids.iter()
+                .filter_map(|id| {
+                    inner
+                        .viewers
+                        .get(id)?
+                        .profile
+                        .as_ref()
+                        .map(|p| p.id.clone())
+                })
+                .collect()
+        };
+        profiles
+            .iter()
+            .filter_map(|profile| self.access.profile(profile))
+            .fold(setting, |q, p| q.min(p.max_quality))
+    }
+
+    /// A player picks the shared quality, up to their own limit.
+    pub async fn set_quality(self: &Arc<Self>, id: u64, quality: Quality) -> Option<Direct> {
+        let limit = self
+            .viewer_profile(id)
+            .map(|p| p.max_quality)
+            .unwrap_or(Quality::Max);
+        if !limit.allows(quality) {
+            return Some(Direct::Error {
+                message: "Your profile cannot pick a quality that high.".to_owned(),
+            });
+        }
+        if let Err(error) = self.access.set_quality(quality).await {
+            return Some(Direct::Error {
+                message: format!("{error:#}"),
+            });
+        }
+        self.changed();
+        self.match_quality();
+        None
+    }
+
+    /// Restarts a running stream when it should run at another quality (the
+    /// console only takes the picture size and bitrate when a stream starts).
+    pub fn match_quality(self: &Arc<Self>) {
+        let wanted = self.wanted_quality();
+        let console_id = {
+            let inner = self.inner.lock().unwrap();
+            match (&inner.stream, inner.stream_quality) {
+                (StreamState::Live { console_id, .. }, Some(current)) if current != wanted => {
+                    console_id.clone()
+                }
+                _ => return,
+            }
+        };
+        println!("[stream] switching quality to {wanted:?}");
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let app = self.clone();
+        tokio::spawn(async move {
+            let session = app.session.lock().unwrap().take();
+            if let Some(session) = session {
+                let _ = session.shutdown().await;
+            }
+            {
+                let mut inner = app.inner.lock().unwrap();
+                let console_name = match &inner.stream {
+                    StreamState::Live { console_name, .. } => console_name.clone(),
+                    _ => String::new(),
+                };
+                inner.stream = StreamState::Starting {
+                    console_id: console_id.clone(),
+                    console_name,
+                    step: "Changing quality".to_owned(),
+                };
+            }
+            app.changed();
+            if let Err(error) = app.run_start(&console_id, generation).await {
+                if app.generation.load(Ordering::SeqCst) == generation {
+                    app.inner.lock().unwrap().stream = StreamState::Failed {
+                        message: format!("{error:#}"),
+                    };
+                    app.changed();
+                }
+            }
+        });
     }
 
     /// The player went back to home: their controller goes to the next in line.
-    pub async fn stop_watching(&self, id: u64) {
-        let effects = self
-            .inner
-            .lock()
-            .unwrap()
-            .seats
-            .stop_watching(id, Instant::now());
+    pub async fn stop_watching(self: &Arc<Self>, id: u64) {
+        let effects = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.watchers.remove(&id);
+            inner.seats.stop_watching(id, Instant::now())
+        };
         self.apply(effects).await;
         self.changed();
+        self.match_quality();
     }
 
     fn rules(&self) -> Rules {
@@ -643,10 +749,11 @@ impl App {
             println!("wake request failed (continuing anyway): {error:#}");
         }
         self.set_step("Starting stream");
+        let quality = self.wanted_quality();
         let signaling = {
             let mut auth = self.auth.lock().await;
             let token = auth.home_streaming_token().await?;
-            let api = HomeApi::new(&token)?;
+            let api = HomeApi::new(&token)?.with_720p(quality.is_720p());
             let app = self.clone();
             let status = move |line: &str| {
                 println!("[stream] {line}");
@@ -662,6 +769,7 @@ impl App {
         let signaling = Arc::new(signaling);
         let options = StreamOptions {
             media: Some(self.media.clone()),
+            max_video_kbps: quality.max_video_kbps(),
             ..Default::default()
         };
         let mut session = match Session::connect(signaling.clone(), options).await {
@@ -708,9 +816,10 @@ impl App {
                 title: None,
             };
             inner.last_keyframe = None;
+            inner.stream_quality = Some(quality);
         }
         self.changed();
-        println!("[stream] live");
+        println!("[stream] live at {quality:?}");
 
         if let Some(mut events) = events {
             let app = self.clone();
@@ -739,12 +848,28 @@ impl App {
                             app.changed();
                         }
                         SessionEvent::Vibration(v) => app.route_rumble(v),
-                        SessionEvent::Disconnected(why) => {
-                            reason = Some(if why.is_empty() {
-                                "the console ended the stream".to_owned()
+                        SessionEvent::IdleWarning { seconds } => {
+                            let minutes = (seconds + 30) / 60;
+                            let when = if minutes >= 1 {
+                                format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
                             } else {
-                                why
-                            });
+                                format!("{seconds} seconds")
+                            };
+                            let text = format!("The Xbox ends the stream in {when} if nothing is pressed. Press any button to keep playing.");
+                            let watchers: Vec<u64> =
+                                app.inner.lock().unwrap().watchers.iter().copied().collect();
+                            for viewer in watchers {
+                                app.send_direct(
+                                    viewer,
+                                    Direct::Notice {
+                                        text: text.clone(),
+                                        countdown: None,
+                                    },
+                                );
+                            }
+                        }
+                        SessionEvent::Disconnected(why) => {
+                            reason = Some(disconnect_reason(&why));
                             break;
                         }
                         SessionEvent::VideoSize { .. } | SessionEvent::ServerMessage { .. } => {}
@@ -967,7 +1092,44 @@ impl App {
             "setupDone": self.access.has_profiles(),
             "admin": admin,
             "turns": turns,
+            "quality": {
+                "setting": self.access.settings().quality,
+                "current": inner.stream_quality,
+                "limit": inner.viewers.get(&id).and_then(|v| v.profile.as_ref()).and_then(|p| self.access.profile(&p.id)).map(|p| p.max_quality).unwrap_or_default(),
+            },
             "playit": self.playit.status(),
         })
+    }
+}
+
+/// A readable line for why the console ended the stream.
+fn disconnect_reason(raw: &str) -> String {
+    let parsed: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let reason = parsed.get("reason").and_then(Value::as_str).unwrap_or(raw);
+    let lower = reason.to_ascii_lowercase();
+    if reason.is_empty() {
+        "The Xbox ended the stream.".to_owned()
+    } else if lower.contains("idle") {
+        "The Xbox ended the stream because nothing was pressed for a while.".to_owned()
+    } else if lower.contains("another") || lower.contains("taken") || lower.contains("replaced") {
+        "The Xbox ended the stream because another device started remote play.".to_owned()
+    } else {
+        format!("The Xbox ended the stream ({reason}).")
+    }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    #[test]
+    fn readable_reasons() {
+        assert_eq!(
+            super::disconnect_reason(r#"{"reason":"Idle"}"#),
+            "The Xbox ended the stream because nothing was pressed for a while."
+        );
+        assert_eq!(super::disconnect_reason(""), "The Xbox ended the stream.");
+        assert_eq!(
+            super::disconnect_reason("Other"),
+            "The Xbox ended the stream (Other)."
+        );
     }
 }

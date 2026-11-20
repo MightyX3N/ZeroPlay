@@ -59,6 +59,7 @@ pub struct HomeApi {
     http: reqwest::Client,
     base_uri: String,
     gs_token: String,
+    os_name: &'static str,
 }
 
 fn device_info() -> String {
@@ -86,7 +87,10 @@ fn device_info() -> String {
 }
 
 /// The body that starts a session on `console_id`.
-fn play_body(console_id: &str) -> Value {
+///
+/// `os_name` picks the picture size the console sends: "android" gives 720p,
+/// "windows" 1080p.
+fn play_body(console_id: &str, os_name: &str) -> Value {
     json!({
         "titleId": "",
         "systemUpdateGroup": "",
@@ -99,7 +103,7 @@ fn play_body(console_id: &str) -> Value {
             "useIceConnection": false,
             "timezoneOffsetMinutes": 120,
             "sdkType": "web",
-            "osName": "windows",
+            "osName": os_name,
         },
         "serverId": console_id,
         "fallbackRegionNames": [],
@@ -160,7 +164,14 @@ impl HomeApi {
             http,
             base_uri: token.base_uri.clone(),
             gs_token: token.gs_token.clone(),
+            os_name: "windows",
         })
+    }
+
+    /// 1080p (the default) or 720p.
+    pub fn with_720p(mut self, yes: bool) -> Self {
+        self.os_name = if yes { "android" } else { "windows" };
+        self
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -204,7 +215,7 @@ impl HomeApi {
         let response = self
             .request(reqwest::Method::POST, "/v5/sessions/home/play")
             .header("X-MS-Device-Info", device_info())
-            .json(&play_body(console_id))
+            .json(&play_body(console_id, self.os_name))
             .send()
             .await?;
         let play: PlayResponse = Self::check(response, "starting the stream")
@@ -364,8 +375,10 @@ mod tests {
 
     #[test]
     fn play_body_targets_the_console() {
-        let body = play_body("F400000000000000");
+        let body = play_body("F400000000000000", "windows");
         assert_eq!(body["serverId"], "F400000000000000");
+        assert_eq!(body["settings"]["osName"], "windows");
+        assert_eq!(play_body("F4", "android")["settings"]["osName"], "android");
         assert_eq!(body["titleId"], "");
         assert_eq!(body["settings"]["nanoVersion"], "V3;WebrtcTransport.dll");
         assert_eq!(body["settings"]["useIceConnection"], false);

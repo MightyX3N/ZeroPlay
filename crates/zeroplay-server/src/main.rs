@@ -321,6 +321,10 @@ enum FromPage {
         on: bool,
     },
     RequestTime,
+    /// The shared stream quality.
+    Quality {
+        quality: access::Quality,
+    },
 }
 
 async fn client(app: Arc<App>, socket: WebSocket, home: bool, profile: Option<access::Profile>) {
@@ -530,7 +534,11 @@ async fn handle(
         FromPage::AdminUpdate {
             id: profile,
             changes,
-        } => return admin_done(app, app.access.update_profile(&profile, changes).await),
+        } => {
+            let done = admin_done(app, app.access.update_profile(&profile, changes).await);
+            app.match_quality();
+            return done;
+        }
         FromPage::AdminDelete { id: profile } => {
             return admin_done(app, app.access.delete_profile(&profile).await)
         }
@@ -550,6 +558,7 @@ async fn handle(
         } => app.answer_time(request, approve).await,
         FromPage::Turns { on } => app.set_turns(id, on),
         FromPage::RequestTime => return app.request_time(id),
+        FromPage::Quality { quality } => return app.set_quality(id, quality).await,
         FromPage::PlayitConnect => app.playit.connect(),
         FromPage::PlayitDisconnect => app.playit.disconnect().await,
     }

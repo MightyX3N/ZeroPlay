@@ -38,6 +38,7 @@ const KEYBOARD_LOCAL = 9;
 let ws = null;
 let status = null;
 let lastError = "";
+let seenStatus = false;
 
 function send(message) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
@@ -311,8 +312,10 @@ function onStatus(s) {
   renderProfiles(s);
   $("me-name").textContent = (s.you && s.you.profile && s.you.profile.name) || "Setup";
   const stream = s.stream;
-  if (stream.state === "failed" && stream.error !== lastError) toast(stream.error);
+  // Show a failure when it happens, not again on every page load.
+  if (stream.state === "failed" && stream.error !== lastError && seenStatus) toast(stream.error);
   lastError = stream.state === "failed" ? stream.error : "";
+  seenStatus = true;
 
   if (!s.signedIn) {
     stopWatching();
@@ -327,6 +330,11 @@ function onStatus(s) {
   if (stream.state === "starting") {
     renderWaking(stream);
     if (!watching()) showScreen("waking");
+    else {
+      // Restarting under the players (for example a quality change).
+      show($("reconnecting"), true);
+      $("reconnect-text").textContent = stream.step === "Changing quality" ? "Changing quality…" : `${stream.step}…`;
+    }
     return;
   }
   const reconnecting = stream.state === "reconnecting";
@@ -540,6 +548,13 @@ class Feed {
   pushVideo(data, key, timestamp) {
     if (key) {
       const codec = avcCodec(data);
+      // A new stream (another quality) brings new picture settings: start the
+      // decoder over for them.
+      const sps = spsKey(data);
+      if (sps && sps !== this.sps) {
+        this.sps = sps;
+        this.codec = null;
+      }
       if (codec && codec !== this.codec) {
         if (this.video) try { this.video.close(); } catch {}
         this.video = new VideoDecoder({
@@ -598,6 +613,18 @@ class Feed {
     if (this.audioCtx) this.audioCtx.close().catch(() => {});
     this.media.getTracks().forEach((t) => t.stop());
   }
+}
+
+// The SPS of an Annex B frame as text, to notice when it changes.
+function spsKey(data) {
+  for (let i = 0; i + 4 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1 && (data[i + 3] & 0x1f) === 7) {
+      let end = i + 4;
+      while (end + 2 < data.length && !(data[end] === 0 && data[end + 1] === 0 && (data[end + 2] === 1 || data[end + 2] === 0))) end++;
+      return Array.from(data.subarray(i + 3, Math.min(end, i + 64))).join(",");
+    }
+  }
+  return null;
 }
 
 // "avc1.PPCCLL" from the SPS in an Annex B frame.
@@ -737,6 +764,35 @@ let mouseSens = Number(localStorage.getItem("zp-mouse-sens")) || 1;
 let statsOn = localStorage.getItem("zp-stats") === "on";
 const menuItems = () => [...document.querySelectorAll("#menu .menu-item")];
 
+// Shared quality: one setting for everyone, each player limited to their
+// profile's maximum. Changing it restarts the stream for a few seconds.
+const QUALITIES = ["max", "high", "medium", "low"];
+const QUALITY_NAMES = { max: "Max (1080p)", high: "High (1080p)", medium: "Medium (720p)", low: "Low (720p)" };
+
+function allowedQualities() {
+  const q = (status && status.quality) || {};
+  const limit = QUALITIES.indexOf(q.limit || "max");
+  return QUALITIES.slice(Math.max(0, limit));
+}
+
+function renderQuality() {
+  const q = (status && status.quality) || {};
+  const setting = q.setting || "max";
+  let text = `Quality: ${QUALITY_NAMES[setting] || setting}`;
+  if (q.current && q.current !== setting) text += ` · now ${QUALITY_NAMES[q.current] || q.current}`;
+  $("m-quality").textContent = text;
+}
+
+$("m-quality").onclick = () => {
+  const allowed = allowedQualities();
+  const setting = (status && status.quality && status.quality.setting) || "max";
+  const next = allowed[(allowed.indexOf(setting) + 1) % allowed.length] || allowed[0];
+  if (next && next !== setting) {
+    send({ t: "quality", quality: next });
+    toast(`Quality: ${QUALITY_NAMES[next]}. The picture comes back in a few seconds.`, true);
+  }
+};
+
 function renderMenu() {
   if (!status) return;
   $("menu-title").textContent = status.stream.consoleName || "Xbox";
@@ -755,6 +811,7 @@ function renderMenu() {
     : turns.waiting ? `In line: number ${turns.waiting}` : "";
   show($("menu-turn"), !!turnText);
   $("menu-turn").textContent = turnText;
+  renderQuality();
   $("m-volume").textContent = muted ? "Volume: muted  ◀ ▶" : `Volume: ${volume}%  ◀ ▶`;
   $("m-record").textContent = recorder ? `Stop recording (${clock(recordSeconds())})` : "Start recording";
   $("m-stats").textContent = statsOn ? "Hide stats" : "Show stats";

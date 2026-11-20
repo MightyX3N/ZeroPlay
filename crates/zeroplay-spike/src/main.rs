@@ -279,6 +279,7 @@ async fn stream(
                 ),
                 Some(SessionEvent::TitleInfo(info)) => println!("[console] now running: {info}"),
                 Some(SessionEvent::ServerMessage { target, content }) => println!("[console] {target} {content}"),
+                Some(SessionEvent::IdleWarning { seconds }) => println!("[console] idle: ends in {seconds} s without input"),
                 Some(SessionEvent::Disconnected(reason)) => {
                     println!("[console] ended the stream: {reason}");
                     break;

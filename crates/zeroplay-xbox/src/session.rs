@@ -147,6 +147,8 @@ pub struct StreamOptions {
     pub audio_path: Option<PathBuf>,
     /// Every video and audio packet, unchanged, for passing on to other peers.
     pub media: Option<tokio::sync::broadcast::Sender<MediaPacket>>,
+    /// Highest video bitrate to ask the console for, in kbit/s (`None` = no limit).
+    pub max_video_kbps: Option<u32>,
 }
 
 /// Things that happen during a stream.
@@ -167,6 +169,10 @@ pub enum SessionEvent {
     ServerMessage {
         target: String,
         content: String,
+    },
+    /// The console will end the stream in `seconds` unless input arrives.
+    IdleWarning {
+        seconds: u32,
     },
     /// The console ended the stream.
     Disconnected(String),
@@ -373,6 +379,36 @@ fn expand_remote_candidates(remote: &[IceCandidate]) -> Vec<RemoteCandidate> {
 /// Asks the console for stereo sound, as Greenlight does.
 fn request_stereo(sdp: &str) -> String {
     sdp.replacen("useinbandfec=1", "useinbandfec=1; stereo=1", 1)
+}
+
+/// Asks for at most `kbps` of video: a `b=AS` line in the video section,
+/// right after its `c=` line (or after the `m=` line when there is none).
+fn limit_video_bitrate(sdp: &str, kbps: u32) -> String {
+    let mut out = String::with_capacity(sdp.len() + 16);
+    let mut in_video = false;
+    let mut added = false;
+    let lines: Vec<&str> = sdp.split("\r\n").collect();
+    for (i, line) in lines.iter().enumerate() {
+        if line.starts_with("m=") {
+            in_video = line.starts_with("m=video");
+            added = false;
+        }
+        if in_video && line.starts_with("b=") {
+            continue;
+        }
+        out.push_str(line);
+        if i + 1 < lines.len() {
+            out.push_str("\r\n");
+        }
+        if in_video && !added {
+            let next_is_c = lines.get(i + 1).is_some_and(|l| l.starts_with("c="));
+            if line.starts_with("c=") || (line.starts_with("m=video") && !next_is_c) {
+                out.push_str(&format!("b=AS:{kbps}\r\n"));
+                added = true;
+            }
+        }
+    }
+    out
 }
 
 fn local_candidate_json(init: &RTCIceCandidateInit) -> IceCandidate {
@@ -699,7 +735,10 @@ impl Session {
             .create_offer(None)
             .await
             .map_err(|e| anyhow!("could not create the offer: {e}"))?;
-        let offer_sdp = request_stereo(&offer.sdp);
+        let mut offer_sdp = request_stereo(&offer.sdp);
+        if let Some(kbps) = handler.options.max_video_kbps {
+            offer_sdp = limit_video_bitrate(&offer_sdp, kbps);
+        }
         peer.set_local_description(offer)
             .await
             .map_err(|e| anyhow!("could not apply the offer: {e}"))?;
@@ -1005,7 +1044,18 @@ async fn handle_message(
                         transaction_complete_message(&id, json!("")),
                     )
                     .await?;
-                    shared.emit(SessionEvent::Disconnected(content));
+                    // The same message carries warnings ("WarningForBeingIdle"
+                    // with seconds left) as well as real disconnects.
+                    let parsed: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+                    let reason = parsed.get("reason").and_then(Value::as_str).unwrap_or("");
+                    match parsed.get("secondsUntilKick").and_then(Value::as_u64) {
+                        Some(seconds) if reason.starts_with("Warning") => {
+                            shared.emit(SessionEvent::IdleWarning {
+                                seconds: seconds as u32,
+                            })
+                        }
+                        _ => shared.emit(SessionEvent::Disconnected(content)),
+                    }
                 }
                 "/streaming/properties/titleinfo" => shared.emit(SessionEvent::TitleInfo(content)),
                 "/streaming/systemUi/messages/ShowMessageDialog" => {
@@ -1082,6 +1132,18 @@ async fn run_keepalive(shared: Arc<Shared>, signaling: Arc<dyn Signaling>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_bitrate_limit_goes_into_the_video_section() {
+        let sdp = "v=0\r\nm=audio 9 UDP 111\r\nc=IN IP4 0.0.0.0\r\nm=video 9 UDP 102\r\nc=IN IP4 0.0.0.0\r\nb=AS:999\r\na=mid:1\r\n";
+        let out = super::limit_video_bitrate(sdp, 8000);
+        assert_eq!(out, "v=0\r\nm=audio 9 UDP 111\r\nc=IN IP4 0.0.0.0\r\nm=video 9 UDP 102\r\nc=IN IP4 0.0.0.0\r\nb=AS:8000\r\na=mid:1\r\n");
+        let no_c = "v=0\r\nm=video 9 UDP 102\r\na=mid:1\r\n";
+        assert_eq!(
+            super::limit_video_bitrate(no_c, 3000),
+            "v=0\r\nm=video 9 UDP 102\r\nb=AS:3000\r\na=mid:1\r\n"
+        );
+    }
+
     use super::*;
 
     fn candidate(text: &str) -> IceCandidate {
