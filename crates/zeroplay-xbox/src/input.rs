@@ -61,7 +61,10 @@ pub struct GamepadState {
 
 impl GamepadState {
     pub fn new(index: u8) -> Self {
-        Self { index, ..Self::default() }
+        Self {
+            index,
+            ..Self::default()
+        }
     }
 }
 
@@ -241,7 +244,10 @@ pub struct Vibration {
 pub enum ServerReport {
     Vibration(Vibration),
     /// The size of the video the console is sending.
-    VideoSize { width: u32, height: u32 },
+    VideoSize {
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Parse a message received on the input channel. Unknown reports give `None`.
@@ -373,7 +379,11 @@ mod tests {
 
     #[test]
     fn several_gamepads_in_one_packet() {
-        let pads = [GamepadState::new(0), GamepadState::new(1), GamepadState::new(3)];
+        let pads = [
+            GamepadState::new(0),
+            GamepadState::new(1),
+            GamepadState::new(3),
+        ];
         let packet = input_packet(300, NOW, &[], &pads, &[], &[]).unwrap();
         assert_eq!(packet.len(), 14 + 1 + 23 * 3);
         assert_eq!(&packet[0..2], &[2, 0]);
@@ -386,10 +396,23 @@ mod tests {
 
     #[test]
     fn mouse_and_keyboard_sections() {
-        let mouse = MouseFrame { x: 5, y: -3, wheel_x: 0, wheel_y: -120, buttons: 1, absolute: false };
+        let mouse = MouseFrame {
+            x: 5,
+            y: -3,
+            wheel_x: 0,
+            wheel_y: -120,
+            buttons: 1,
+            absolute: false,
+        };
         let keys = [
-            KeyboardFrame { pressed: true, key_code: 87 },
-            KeyboardFrame { pressed: false, key_code: 32 },
+            KeyboardFrame {
+                pressed: true,
+                key_code: 87,
+            },
+            KeyboardFrame {
+                pressed: false,
+                key_code: 32,
+            },
         ];
         let packet = input_packet(11, NOW, &[], &[], &[mouse], &keys).unwrap();
         let mut expected = expect_header(32 | 64, 11);
@@ -407,14 +430,20 @@ mod tests {
 
     #[test]
     fn sections_come_in_fixed_order() {
-        let meta = MetadataFrame { server_data_key: 42, ..Default::default() };
+        let meta = MetadataFrame {
+            server_data_key: 42,
+            ..Default::default()
+        };
         let packet = input_packet(
             13,
             NOW,
             &[meta],
             &[GamepadState::new(0)],
             &[MouseFrame::default()],
-            &[KeyboardFrame { pressed: true, key_code: 13 }],
+            &[KeyboardFrame {
+                pressed: true,
+                key_code: 13,
+            }],
         )
         .unwrap();
         assert_eq!(u16::from_le_bytes([packet[0], packet[1]]), 1 | 2 | 32 | 64);
@@ -471,7 +500,13 @@ mod tests {
         let mut data = vec![16, 0];
         data.extend_from_slice(&1080u32.to_le_bytes());
         data.extend_from_slice(&1920u32.to_le_bytes());
-        assert_eq!(parse_server_report(&data), Some(ServerReport::VideoSize { width: 1920, height: 1080 }));
+        assert_eq!(
+            parse_server_report(&data),
+            Some(ServerReport::VideoSize {
+                width: 1920,
+                height: 1080
+            })
+        );
     }
 
     #[test]

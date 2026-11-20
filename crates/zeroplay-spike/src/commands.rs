@@ -26,15 +26,24 @@ pub enum Command {
     Tap(u16),
     Hold(u16),
     Release(u16),
-    Trigger { right: bool },
-    Stick { right: bool, x: f64, y: f64 },
+    Trigger {
+        right: bool,
+    },
+    Stick {
+        right: bool,
+        x: f64,
+        y: f64,
+    },
     Center,
     /// Zero-based pad slot.
     Pad(u8),
     Unplug(u8),
     /// Windows virtual-key code.
     Key(u8),
-    MouseMove { x: i32, y: i32 },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
     Click(u8),
     Keyframe,
     Stats,
@@ -87,7 +96,9 @@ fn key_code(text: &str) -> Option<u8> {
             "tab" => Some(0x09),
             "shift" => Some(0x10),
             "ctrl" => Some(0x11),
-            _ => text.strip_prefix("0x").map_or_else(|| text.parse().ok(), |hex| u8::from_str_radix(hex, 16).ok()),
+            _ => text
+                .strip_prefix("0x")
+                .map_or_else(|| text.parse().ok(), |hex| u8::from_str_radix(hex, 16).ok()),
         },
     }
 }
@@ -96,14 +107,20 @@ fn key_code(text: &str) -> Option<u8> {
 pub fn parse(line: &str) -> Result<Command, String> {
     let lower = line.trim().to_ascii_lowercase();
     let mut words = lower.split_whitespace();
-    let Some(first) = words.next() else { return Ok(Command::Nothing) };
+    let Some(first) = words.next() else {
+        return Ok(Command::Nothing);
+    };
     let command = match first {
         "help" | "?" => Command::Help,
         "quit" | "exit" | "q" => Command::Quit,
         "hold" | "release" => {
             let name = words.next().ok_or("which button? for example: hold a")?;
             let bits = button_named(name).ok_or_else(|| format!("unknown button \"{name}\""))?;
-            if first == "hold" { Command::Hold(bits) } else { Command::Release(bits) }
+            if first == "hold" {
+                Command::Hold(bits)
+            } else {
+                Command::Release(bits)
+            }
         }
         "lt" => Command::Trigger { right: false },
         "rt" => Command::Trigger { right: true },
@@ -113,7 +130,11 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 Some("r") | Some("right") => true,
                 _ => return Err("which stick? for example: stick l 0.5 -1".to_owned()),
             };
-            Command::Stick { right, x: axis(words.next())?, y: axis(words.next())? }
+            Command::Stick {
+                right,
+                x: axis(words.next())?,
+                y: axis(words.next())?,
+            }
         }
         "center" | "centre" => Command::Center,
         "pad" => Command::Pad(pad_slot(words.next())?),
@@ -140,11 +161,17 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "stats" => Command::Stats,
         name => match button_named(name) {
             Some(bits) => Command::Tap(bits),
-            None => return Err(format!("unknown command \"{name}\", type help for the list")),
+            None => {
+                return Err(format!(
+                    "unknown command \"{name}\", type help for the list"
+                ))
+            }
         },
     };
     if let Some(extra) = words.next() {
-        return Err(format!("did not expect \"{extra}\" there, type help for the list"));
+        return Err(format!(
+            "did not expect \"{extra}\" there, type help for the list"
+        ));
     }
     Ok(command)
 }
@@ -164,15 +191,32 @@ mod tests {
     #[test]
     fn hold_and_release() {
         assert_eq!(parse("hold rb"), Ok(Command::Hold(button::RIGHT_SHOULDER)));
-        assert_eq!(parse("release rb"), Ok(Command::Release(button::RIGHT_SHOULDER)));
+        assert_eq!(
+            parse("release rb"),
+            Ok(Command::Release(button::RIGHT_SHOULDER))
+        );
         assert!(parse("hold").is_err());
         assert!(parse("hold banana").is_err());
     }
 
     #[test]
     fn sticks_and_triggers() {
-        assert_eq!(parse("stick l 0.5 -1"), Ok(Command::Stick { right: false, x: 0.5, y: -1.0 }));
-        assert_eq!(parse("stick right 0 1"), Ok(Command::Stick { right: true, x: 0.0, y: 1.0 }));
+        assert_eq!(
+            parse("stick l 0.5 -1"),
+            Ok(Command::Stick {
+                right: false,
+                x: 0.5,
+                y: -1.0
+            })
+        );
+        assert_eq!(
+            parse("stick right 0 1"),
+            Ok(Command::Stick {
+                right: true,
+                x: 0.0,
+                y: 1.0
+            })
+        );
         assert!(parse("stick l 2 0").is_err());
         assert!(parse("stick l 0").is_err());
         assert!(parse("stick up 0 0").is_err());
@@ -198,10 +242,16 @@ mod tests {
         assert_eq!(parse("key 0x70"), Ok(Command::Key(0x70)));
         assert_eq!(parse("key 112"), Ok(Command::Key(112)));
         assert!(parse("key nope").is_err());
-        assert_eq!(parse("mouse 40 -10"), Ok(Command::MouseMove { x: 40, y: -10 }));
+        assert_eq!(
+            parse("mouse 40 -10"),
+            Ok(Command::MouseMove { x: 40, y: -10 })
+        );
         assert!(parse("mouse 40").is_err());
         assert_eq!(parse("click"), Ok(Command::Click(mouse_button::LEFT)));
-        assert_eq!(parse("click right"), Ok(Command::Click(mouse_button::RIGHT)));
+        assert_eq!(
+            parse("click right"),
+            Ok(Command::Click(mouse_button::RIGHT))
+        );
         assert!(parse("click sideways").is_err());
     }
 

@@ -31,7 +31,11 @@ pub enum Effect {
     /// Unplug this slot on the console.
     Unplug(u8),
     /// Tell one player something. `countdown` shows a big countdown in seconds.
-    Notice { viewer: u64, text: String, countdown: Option<u32> },
+    Notice {
+        viewer: u64,
+        text: String,
+        countdown: Option<u32>,
+    },
     /// End the stream and free the console.
     Stop(&'static str),
 }
@@ -104,7 +108,9 @@ fn same_input(a: &GamepadState, b: &GamepadState) -> bool {
 
 impl Seats {
     pub fn slots_of(&self, viewer: u64) -> Vec<usize> {
-        (0..SLOTS).filter(|&s| matches!(self.owner[s], Some((v, _)) if v == viewer)).collect()
+        (0..SLOTS)
+            .filter(|&s| matches!(self.owner[s], Some((v, _)) if v == viewer))
+            .collect()
     }
 
     /// Waiting players in queue order.
@@ -121,12 +127,24 @@ impl Seats {
 
     /// The slot for one of a player's controllers: the one it already has,
     /// a slot held for the player's profile, or a free one.
-    pub fn claim(&mut self, viewer: u64, local: u8, profile: Option<&str>, now: Instant) -> Option<(usize, bool)> {
+    pub fn claim(
+        &mut self,
+        viewer: u64,
+        local: u8,
+        profile: Option<&str>,
+        now: Instant,
+    ) -> Option<(usize, bool)> {
         if let Some(slot) = self.owner.iter().position(|o| *o == Some((viewer, local))) {
             return Some((slot, false));
         }
-        let held = profile.and_then(|p| self.reserved.iter().position(|r| matches!(r, Some((owner, _)) if owner == p)));
-        let slot = held.or_else(|| (0..SLOTS).find(|&s| self.owner[s].is_none() && self.reserved[s].is_none()))?;
+        let held = profile.and_then(|p| {
+            self.reserved
+                .iter()
+                .position(|r| matches!(r, Some((owner, _)) if owner == p))
+        });
+        let slot = held.or_else(|| {
+            (0..SLOTS).find(|&s| self.owner[s].is_none() && self.reserved[s].is_none())
+        })?;
         self.reserved[slot] = None;
         self.owner[slot] = Some((viewer, local));
         self.waiting.remove(&viewer);
@@ -135,9 +153,17 @@ impl Seats {
     }
 
     /// A controller's new state. Returns the state to send to the console.
-    pub fn input(&mut self, viewer: u64, slot: usize, mut state: GamepadState, now: Instant) -> GamepadState {
+    pub fn input(
+        &mut self,
+        viewer: u64,
+        slot: usize,
+        mut state: GamepadState,
+        now: Instant,
+    ) -> GamepadState {
         state.index = slot as u8;
-        let changed = self.pad[slot].as_ref().is_none_or(|old| !same_input(old, &state));
+        let changed = self.pad[slot]
+            .as_ref()
+            .is_none_or(|old| !same_input(old, &state));
         if changed {
             self.last_input.insert(viewer, now);
             self.afk_warned.remove(&viewer);
@@ -148,7 +174,10 @@ impl Seats {
 
     /// A player unplugs one controller (separate-players mode).
     pub fn unplug(&mut self, viewer: u64, local: u8) -> Option<usize> {
-        let slot = self.owner.iter().position(|o| *o == Some((viewer, local)))?;
+        let slot = self
+            .owner
+            .iter()
+            .position(|o| *o == Some((viewer, local)))?;
         self.owner[slot] = None;
         self.pad[slot] = None;
         self.turn_end[slot] = None;
@@ -174,7 +203,14 @@ impl Seats {
 
     /// The player's connection is gone. With a stream running, their slots are
     /// held for their profile and the controllers unplugged (so games pause).
-    pub fn disconnect(&mut self, viewer: u64, profile: Option<&str>, live: bool, now: Instant, rules: &Rules) -> Vec<Effect> {
+    pub fn disconnect(
+        &mut self,
+        viewer: u64,
+        profile: Option<&str>,
+        live: bool,
+        now: Instant,
+        rules: &Rules,
+    ) -> Vec<Effect> {
         self.waiting.remove(&viewer);
         self.opted_in.remove(&viewer);
         self.last_input.remove(&viewer);
@@ -218,7 +254,11 @@ impl Seats {
                 self.last_input.insert(viewer, now);
                 self.afk_warned.remove(&viewer);
                 effects.push(Effect::Plug(neutral(slot)));
-                effects.push(Effect::Notice { viewer, text: format!("You have control now (player {}).", slot + 1), countdown: None });
+                effects.push(Effect::Notice {
+                    viewer,
+                    text: format!("You have control now (player {}).", slot + 1),
+                    countdown: None,
+                });
             }
             None => {
                 self.owner[slot] = None;
@@ -241,12 +281,19 @@ impl Seats {
             return None;
         }
         self.next_request += 1;
-        self.time_requests.push(TimeRequest { id: self.next_request, viewer, slot, minutes });
+        self.time_requests.push(TimeRequest {
+            id: self.next_request,
+            viewer,
+            slot,
+            minutes,
+        });
         Some(self.next_request)
     }
 
     pub fn answer_time(&mut self, id: u64, approve: bool) -> Vec<Effect> {
-        let Some(index) = self.time_requests.iter().position(|r| r.id == id) else { return Vec::new() };
+        let Some(index) = self.time_requests.iter().position(|r| r.id == id) else {
+            return Vec::new();
+        };
         let request = self.time_requests.remove(index);
         if approve {
             if let Some(end) = &mut self.turn_end[request.slot] {
@@ -254,12 +301,26 @@ impl Seats {
             }
             self.turn_marks[request.slot] = 0;
         }
-        let text = if approve { format!("You got {} more minutes.", request.minutes) } else { "No extra time this turn.".to_owned() };
-        vec![Effect::Notice { viewer: request.viewer, text, countdown: None }]
+        let text = if approve {
+            format!("You got {} more minutes.", request.minutes)
+        } else {
+            "No extra time this turn.".to_owned()
+        };
+        vec![Effect::Notice {
+            viewer: request.viewer,
+            text,
+            countdown: None,
+        }]
     }
 
     /// Runs every second.
-    pub fn tick(&mut self, now: Instant, rules: &Rules, live: bool, connected: usize) -> Vec<Effect> {
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        rules: &Rules,
+        live: bool,
+        connected: usize,
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
         if !live {
             self.empty_since = None;
@@ -290,10 +351,20 @@ impl Seats {
 
         // AFK.
         for slot in 0..SLOTS {
-            let Some((viewer, _)) = self.owner[slot] else { continue };
-            let idle = self.last_input.get(&viewer).map(|t| now.duration_since(*t)).unwrap_or_default();
+            let Some((viewer, _)) = self.owner[slot] else {
+                continue;
+            };
+            let idle = self
+                .last_input
+                .get(&viewer)
+                .map(|t| now.duration_since(*t))
+                .unwrap_or_default();
             if idle >= rules.afk {
-                effects.push(Effect::Notice { viewer, text: "No input for 5 minutes, so control was passed on.".to_owned(), countdown: None });
+                effects.push(Effect::Notice {
+                    viewer,
+                    text: "No input for 5 minutes, so control was passed on.".to_owned(),
+                    countdown: None,
+                });
                 self.hand_off(slot, now, false, &mut effects);
             } else if idle + rules.afk_warning >= rules.afk && self.afk_warned.insert(viewer) {
                 effects.push(Effect::Notice {
@@ -308,7 +379,9 @@ impl Seats {
         if let Some(turn) = rules.turn {
             let someone_waiting = self.queue().iter().any(|v| self.opted_in.contains(v));
             for slot in 0..SLOTS {
-                let Some((viewer, _)) = self.owner[slot] else { continue };
+                let Some((viewer, _)) = self.owner[slot] else {
+                    continue;
+                };
                 if !self.opted_in.contains(&viewer) || !someone_waiting {
                     self.turn_end[slot] = None;
                     self.turn_marks[slot] = 0;
@@ -323,17 +396,33 @@ impl Seats {
                 let left = end.saturating_duration_since(now).as_secs();
                 let marks = &mut self.turn_marks[slot];
                 if left == 0 {
-                    effects.push(Effect::Notice { viewer, text: "Your turn is over. You are back in the queue.".to_owned(), countdown: None });
+                    effects.push(Effect::Notice {
+                        viewer,
+                        text: "Your turn is over. You are back in the queue.".to_owned(),
+                        countdown: None,
+                    });
                     self.hand_off(slot, now, true, &mut effects);
                 } else if left <= 10 && *marks & 4 == 0 {
                     *marks |= 7;
-                    effects.push(Effect::Notice { viewer, text: "Switching players".to_owned(), countdown: Some(left as u32) });
+                    effects.push(Effect::Notice {
+                        viewer,
+                        text: "Switching players".to_owned(),
+                        countdown: Some(left as u32),
+                    });
                 } else if left <= 30 && *marks & 2 == 0 {
                     *marks |= 3;
-                    effects.push(Effect::Notice { viewer, text: "30 seconds left of your turn.".to_owned(), countdown: None });
+                    effects.push(Effect::Notice {
+                        viewer,
+                        text: "30 seconds left of your turn.".to_owned(),
+                        countdown: None,
+                    });
                 } else if left <= 120 && *marks & 1 == 0 {
                     *marks |= 1;
-                    effects.push(Effect::Notice { viewer, text: "2 minutes left of your turn.".to_owned(), countdown: None });
+                    effects.push(Effect::Notice {
+                        viewer,
+                        text: "2 minutes left of your turn.".to_owned(),
+                        countdown: None,
+                    });
                 }
             }
         } else {
@@ -341,8 +430,12 @@ impl Seats {
         }
 
         // AFK with nobody to hand over to and nobody else playing: stop.
-        let anyone_playing = self.owner.iter().any(Option::is_some) || self.reserved.iter().any(Option::is_some);
-        if !anyone_playing && effects.iter().any(|e| matches!(e, Effect::Unplug(_))) && self.waiting.is_empty() {
+        let anyone_playing =
+            self.owner.iter().any(Option::is_some) || self.reserved.iter().any(Option::is_some);
+        if !anyone_playing
+            && effects.iter().any(|e| matches!(e, Effect::Unplug(_)))
+            && self.waiting.is_empty()
+        {
             effects.push(Effect::Stop("Nobody was playing any more."));
         }
         effects
@@ -358,14 +451,20 @@ mod tests {
     }
 
     fn pressed(slot: usize) -> GamepadState {
-        GamepadState { index: slot as u8, buttons: 16, ..GamepadState::default() }
+        GamepadState {
+            index: slot as u8,
+            buttons: 16,
+            ..GamepadState::default()
+        }
     }
 
     fn notices_for(effects: &[Effect], viewer: u64) -> Vec<String> {
         effects
             .iter()
             .filter_map(|e| match e {
-                Effect::Notice { viewer: v, text, .. } if *v == viewer => Some(text.clone()),
+                Effect::Notice {
+                    viewer: v, text, ..
+                } if *v == viewer => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -382,7 +481,10 @@ mod tests {
         let effects = seats.stop_watching(1, t0 + secs(10));
         assert_eq!(seats.owner[0], Some((3, MERGED_LOCAL)), "3 waited longest");
         assert!(effects.contains(&Effect::Plug(GamepadState::new(0))));
-        assert_eq!(notices_for(&effects, 3), vec!["You have control now (player 1).".to_owned()]);
+        assert_eq!(
+            notices_for(&effects, 3),
+            vec!["You have control now (player 1).".to_owned()]
+        );
         assert_eq!(seats.queue(), vec![2]);
     }
 
@@ -428,8 +530,18 @@ mod tests {
         seats.start_watching(2, t0);
         assert!(seats.tick(t0 + secs(200), &rules, true, 2).is_empty());
         let warning = seats.tick(t0 + secs(271), &rules, true, 2);
-        assert!(matches!(warning.as_slice(), [Effect::Notice { viewer: 1, countdown: Some(30), .. }]));
-        assert!(seats.tick(t0 + secs(272), &rules, true, 2).is_empty(), "warned once");
+        assert!(matches!(
+            warning.as_slice(),
+            [Effect::Notice {
+                viewer: 1,
+                countdown: Some(30),
+                ..
+            }]
+        ));
+        assert!(
+            seats.tick(t0 + secs(272), &rules, true, 2).is_empty(),
+            "warned once"
+        );
         let effects = seats.tick(t0 + secs(300), &rules, true, 2);
         assert_eq!(seats.owner[0], Some((2, MERGED_LOCAL)));
         assert!(!notices_for(&effects, 1).is_empty());
@@ -469,7 +581,10 @@ mod tests {
         let mut seats = Seats::default();
         assert!(seats.tick(t0, &rules, true, 0).is_empty());
         assert!(seats.tick(t0 + secs(29), &rules, true, 0).is_empty());
-        assert!(matches!(seats.tick(t0 + secs(30), &rules, true, 0).as_slice(), [Effect::Stop(_)]));
+        assert!(matches!(
+            seats.tick(t0 + secs(30), &rules, true, 0).as_slice(),
+            [Effect::Stop(_)]
+        ));
         // Somebody back in time resets the clock.
         let mut seats = Seats::default();
         seats.tick(t0, &rules, true, 0);
@@ -480,7 +595,10 @@ mod tests {
     #[test]
     fn timed_play_counts_down_and_switches() {
         let t0 = Instant::now();
-        let rules = Rules { turn: Some(secs(600)), ..Rules::default() };
+        let rules = Rules {
+            turn: Some(secs(600)),
+            ..Rules::default()
+        };
         let mut seats = Seats::default();
         seats.claim(1, 0, None, t0).unwrap();
         seats.opted_in.insert(1);
@@ -489,7 +607,15 @@ mod tests {
         let mut t = t0;
         for _ in 0..3 {
             t += secs(200);
-            seats.input(1, 0, GamepadState { buttons: (t - t0).as_secs() as u16, ..GamepadState::default() }, t);
+            seats.input(
+                1,
+                0,
+                GamepadState {
+                    buttons: (t - t0).as_secs() as u16,
+                    ..GamepadState::default()
+                },
+                t,
+            );
             assert!(seats.tick(t, &rules, true, 2).is_empty());
         }
         assert_eq!(seats.turn_left(0, t), None);
@@ -497,25 +623,53 @@ mod tests {
         seats.tick(t, &rules, true, 2);
         assert_eq!(seats.turn_left(0, t), Some(600));
         let keep_active = |seats: &mut Seats, at: Instant| {
-            seats.input(1, 0, GamepadState { buttons: (at - t0).as_secs() as u16, ..GamepadState::default() }, at);
+            seats.input(
+                1,
+                0,
+                GamepadState {
+                    buttons: (at - t0).as_secs() as u16,
+                    ..GamepadState::default()
+                },
+                at,
+            );
         };
         keep_active(&mut seats, t + secs(480));
-        assert_eq!(notices_for(&seats.tick(t + secs(480), &rules, true, 2), 1), vec!["2 minutes left of your turn.".to_owned()]);
+        assert_eq!(
+            notices_for(&seats.tick(t + secs(480), &rules, true, 2), 1),
+            vec!["2 minutes left of your turn.".to_owned()]
+        );
         keep_active(&mut seats, t + secs(570));
-        assert_eq!(notices_for(&seats.tick(t + secs(570), &rules, true, 2), 1), vec!["30 seconds left of your turn.".to_owned()]);
+        assert_eq!(
+            notices_for(&seats.tick(t + secs(570), &rules, true, 2), 1),
+            vec!["30 seconds left of your turn.".to_owned()]
+        );
         keep_active(&mut seats, t + secs(590));
         let countdown = seats.tick(t + secs(590), &rules, true, 2);
-        assert!(matches!(countdown.as_slice(), [Effect::Notice { viewer: 1, countdown: Some(10), .. }]));
+        assert!(matches!(
+            countdown.as_slice(),
+            [Effect::Notice {
+                viewer: 1,
+                countdown: Some(10),
+                ..
+            }]
+        ));
         keep_active(&mut seats, t + secs(600));
         seats.tick(t + secs(600), &rules, true, 2);
         assert_eq!(seats.owner[0].map(|o| o.0), Some(2));
-        assert_eq!(seats.queue(), vec![1], "the previous player waits for the next turn");
+        assert_eq!(
+            seats.queue(),
+            vec![1],
+            "the previous player waits for the next turn"
+        );
     }
 
     #[test]
     fn asking_for_more_time_stops_the_clock_until_answered() {
         let t0 = Instant::now();
-        let rules = Rules { turn: Some(secs(600)), ..Rules::default() };
+        let rules = Rules {
+            turn: Some(secs(600)),
+            ..Rules::default()
+        };
         let mut seats = Seats::default();
         seats.claim(1, 0, None, t0).unwrap();
         seats.opted_in.extend([1, 2]);
@@ -524,12 +678,27 @@ mod tests {
         let id = seats.request_time(1, 15).unwrap();
         assert!(seats.request_time(1, 15).is_none(), "one request at a time");
         for s in 1..=100 {
-            seats.input(1, 0, GamepadState { buttons: s, ..GamepadState::default() }, t0 + secs(s as u64));
+            seats.input(
+                1,
+                0,
+                GamepadState {
+                    buttons: s,
+                    ..GamepadState::default()
+                },
+                t0 + secs(s as u64),
+            );
             seats.tick(t0 + secs(s as u64), &rules, true, 2);
         }
-        assert_eq!(seats.turn_left(0, t0 + secs(100)), Some(600), "paused while waiting");
+        assert_eq!(
+            seats.turn_left(0, t0 + secs(100)),
+            Some(600),
+            "paused while waiting"
+        );
         let answer = seats.answer_time(id, true);
-        assert_eq!(notices_for(&answer, 1), vec!["You got 15 more minutes.".to_owned()]);
+        assert_eq!(
+            notices_for(&answer, 1),
+            vec!["You got 15 more minutes.".to_owned()]
+        );
         assert_eq!(seats.turn_left(0, t0 + secs(100)), Some(600 + 900));
     }
 }

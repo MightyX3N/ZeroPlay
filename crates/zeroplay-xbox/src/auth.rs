@@ -87,7 +87,11 @@ struct Xui {
 impl XboxToken {
     /// The "user hash" that goes into the `XBL3.0` authorization header.
     pub fn user_hash(&self) -> &str {
-        self.display_claims.xui.first().map(|x| x.uhs.as_str()).unwrap_or("")
+        self.display_claims
+            .xui
+            .first()
+            .map(|x| x.uhs.as_str())
+            .unwrap_or("")
     }
 
     /// The `Authorization` header value for Xbox Live web APIs.
@@ -129,12 +133,16 @@ struct Region {
 
 /// Where the sign-in is saved: `<config dir>/zeroplay/tokens.json`.
 pub fn default_token_path() -> Result<PathBuf> {
-    let dir = dirs::config_dir().ok_or_else(|| anyhow!("could not find a config folder on this system"))?;
+    let dir = dirs::config_dir()
+        .ok_or_else(|| anyhow!("could not find a config folder on this system"))?;
     Ok(dir.join("zeroplay").join("tokens.json"))
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 async fn read_error(response: reqwest::Response, what: &str) -> anyhow::Error {
@@ -160,9 +168,13 @@ impl Auth {
                     .with_context(|| format!("{} is not a valid token file", path.display()))?,
             ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error).with_context(|| format!("could not read {}", path.display())),
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not read {}", path.display()))
+            }
         };
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?;
         Ok(Self { http, path, tokens })
     }
 
@@ -175,7 +187,9 @@ impl Auth {
     }
 
     async fn save(&self) -> Result<()> {
-        let Some(tokens) = &self.tokens else { return Ok(()) };
+        let Some(tokens) = &self.tokens else {
+            return Ok(());
+        };
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -250,7 +264,11 @@ impl Auth {
                 "authorization_pending" | "slow_down" => continue,
                 "authorization_declined" => bail!("the sign-in was declined"),
                 "expired_token" => bail!("the sign-in code expired before it was used"),
-                _ => bail!("sign-in failed with HTTP {status}: {} {}", error.error, error.error_description),
+                _ => bail!(
+                    "sign-in failed with HTTP {status}: {} {}",
+                    error.error,
+                    error.error_description
+                ),
             }
         }
     }
@@ -269,7 +287,9 @@ impl Auth {
     }
 
     fn tokens(&self) -> Result<&StoredTokens> {
-        self.tokens.as_ref().ok_or_else(|| anyhow!("not signed in yet: run the login command first"))
+        self.tokens
+            .as_ref()
+            .ok_or_else(|| anyhow!("not signed in yet: run the login command first"))
     }
 
     /// A Microsoft access token that is good for at least another minute.
@@ -294,7 +314,9 @@ impl Auth {
             let status = response.status();
             let error = read_error(response, "refreshing the sign-in").await;
             if status == reqwest::StatusCode::BAD_REQUEST {
-                bail!("the saved sign-in is no longer valid, run the login command again ({error})");
+                bail!(
+                    "the saved sign-in is no longer valid, run the login command again ({error})"
+                );
             }
             return Err(error);
         }
@@ -355,7 +377,11 @@ impl Auth {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(read_error(response, &format!("Xbox Live authorization for {relying_party}")).await);
+            return Err(read_error(
+                response,
+                &format!("Xbox Live authorization for {relying_party}"),
+            )
+            .await);
         }
         Ok(response.json().await?)
     }
@@ -462,7 +488,11 @@ mod tests {
 
     #[test]
     fn stored_tokens_round_trip() {
-        let tokens = StoredTokens { refresh_token: "r".into(), access_token: "a".into(), access_expires_at: 5 };
+        let tokens = StoredTokens {
+            refresh_token: "r".into(),
+            access_token: "a".into(),
+            access_expires_at: 5,
+        };
         let text = serde_json::to_string(&tokens).unwrap();
         let back: StoredTokens = serde_json::from_str(&text).unwrap();
         assert_eq!(back.refresh_token, "r");

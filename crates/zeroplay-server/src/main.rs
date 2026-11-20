@@ -11,6 +11,7 @@ mod control;
 mod playit;
 mod sdp;
 mod viewer;
+mod wsmedia;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -83,15 +84,36 @@ async fn run() -> Result<()> {
 
 fn router(app: Arc<App>, door: Door) -> Router {
     Router::new()
-        .route("/", get(|| async { page(INDEX_HTML, "text/html; charset=utf-8") }))
-        .route("/app.js", get(|| async { page(APP_JS, "text/javascript; charset=utf-8") }))
-        .route("/style.css", get(|| async { page(STYLE_CSS, "text/css; charset=utf-8") }))
-        .route("/manifest.webmanifest", get(|| async { page(MANIFEST, "application/manifest+json") }))
-        .route("/sw.js", get(|| async { page(SERVICE_WORKER, "text/javascript; charset=utf-8") }))
+        .route(
+            "/",
+            get(|| async { page(INDEX_HTML, "text/html; charset=utf-8") }),
+        )
+        .route(
+            "/app.js",
+            get(|| async { page(APP_JS, "text/javascript; charset=utf-8") }),
+        )
+        .route(
+            "/style.css",
+            get(|| async { page(STYLE_CSS, "text/css; charset=utf-8") }),
+        )
+        .route(
+            "/manifest.webmanifest",
+            get(|| async { page(MANIFEST, "application/manifest+json") }),
+        )
+        .route(
+            "/sw.js",
+            get(|| async { page(SERVICE_WORKER, "text/javascript; charset=utf-8") }),
+        )
         .route("/icons/icon-192.png", get(|| async { image(ICON_192) }))
         .route("/icons/icon-512.png", get(|| async { image(ICON_512) }))
-        .route("/icons/icon-maskable-512.png", get(|| async { image(ICON_MASKABLE) }))
-        .route("/icons/apple-touch-icon.png", get(|| async { image(APPLE_ICON) }))
+        .route(
+            "/icons/icon-maskable-512.png",
+            get(|| async { image(ICON_MASKABLE) }),
+        )
+        .route(
+            "/icons/apple-touch-icon.png",
+            get(|| async { image(APPLE_ICON) }),
+        )
         .route("/apple-touch-icon.png", get(|| async { image(APPLE_ICON) }))
         .route("/api/access", get(access_state))
         .route("/api/setup", post(setup))
@@ -104,11 +126,25 @@ fn router(app: Arc<App>, door: Door) -> Router {
 }
 
 fn image(body: &'static [u8]) -> Response {
-    ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=86400")], body).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 fn page(body: &'static str, content_type: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// What the page should show: the app, a login, or "set up at home first".
@@ -138,7 +174,11 @@ fn with_cookie(cookie: String) -> Response {
 }
 
 fn refused(message: impl std::fmt::Display) -> Response {
-    (StatusCode::FORBIDDEN, Json(json!({ "error": message.to_string() }))).into_response()
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": message.to_string() })),
+    )
+        .into_response()
 }
 
 /// The first profile: the admin. From home only.
@@ -148,9 +188,15 @@ async fn setup(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(form): Json<ProfileForm>,
 ) -> Response {
-    match app.access.create_admin(door, peer, &form.name, &form.password).await {
+    match app
+        .access
+        .create_admin(door, peer, &form.name, &form.password)
+        .await
+    {
         Ok(token) => {
-            let admin = app.access.admin_view()["profiles"][0]["id"].as_str().and_then(|id| app.access.profile(id));
+            let admin = app.access.admin_view()["profiles"][0]["id"]
+                .as_str()
+                .and_then(|id| app.access.profile(id));
             if let Some(admin) = admin {
                 app.adopt_first_profile(&admin);
             }
@@ -203,28 +249,77 @@ enum FromPage {
     Login,
     Logout,
     Refresh,
-    Wake { id: String },
-    Start { id: String },
+    Wake {
+        id: String,
+    },
+    Start {
+        id: String,
+    },
     Stop,
-    Offer { sdp: String },
+    Offer {
+        sdp: String,
+    },
+    /// Video and sound inside this connection (players outside the home).
+    Media,
     Leave,
-    Pad { local: u8, buttons: u16, lx: f64, ly: f64, rx: f64, ry: f64, lt: f64, rt: f64 },
-    Unplug { local: u8 },
-    Key { code: u8, down: bool },
-    Mouse { dx: i32, dy: i32, buttons: u8, wheel: i32 },
+    Pad {
+        local: u8,
+        buttons: u16,
+        lx: f64,
+        ly: f64,
+        rx: f64,
+        ry: f64,
+        lt: f64,
+        rt: f64,
+    },
+    Unplug {
+        local: u8,
+    },
+    Key {
+        code: u8,
+        down: bool,
+    },
+    Mouse {
+        dx: i32,
+        dy: i32,
+        buttons: u8,
+        wheel: i32,
+    },
     Keyframe,
     PlayitConnect,
     PlayitDisconnect,
     // The admin's profile management.
-    AdminCreate { name: String, password: String, admin: bool },
-    AdminUpdate { id: String, changes: access::ProfileChanges },
-    AdminDelete { id: String },
-    AdminAnswer { id: String, approve: bool },
-    AdminAllowRequests { allow: bool },
-    AdminTimedPlay { enabled: bool, minutes: u32 },
-    AdminAnswerTime { id: u64, approve: bool },
+    AdminCreate {
+        name: String,
+        password: String,
+        admin: bool,
+    },
+    AdminUpdate {
+        id: String,
+        changes: access::ProfileChanges,
+    },
+    AdminDelete {
+        id: String,
+    },
+    AdminAnswer {
+        id: String,
+        approve: bool,
+    },
+    AdminAllowRequests {
+        allow: bool,
+    },
+    AdminTimedPlay {
+        enabled: bool,
+        minutes: u32,
+    },
+    AdminAnswerTime {
+        id: u64,
+        approve: bool,
+    },
     // Timed play.
-    Turns { on: bool },
+    Turns {
+        on: bool,
+    },
     RequestTime,
 }
 
@@ -232,16 +327,20 @@ async fn client(app: Arc<App>, socket: WebSocket, home: bool, profile: Option<ac
     let (id, mut direct) = app.add_viewer(home, profile);
     let (mut sink, mut stream) = socket.split();
     let mut updates = app.subscribe_updates();
-    let mut peer: Option<ViewerPeer> = None;
+    let mut watch = Watch::default();
+    let (media_tx, mut media_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(96);
 
-    let mut send_ok = sink.send(Message::Text(app.status_for(id).to_string().into())).await.is_ok();
+    let mut send_ok = sink
+        .send(Message::Text(app.status_for(id).to_string().into()))
+        .await
+        .is_ok();
     while send_ok {
         tokio::select! {
             incoming = stream.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<FromPage>(&text) {
                         Ok(message) => {
-                            if let Some(reply) = handle(&app, id, home, message, &mut peer).await {
+                            if let Some(reply) = handle(&app, id, home, message, &mut watch, &media_tx).await {
                                 send_ok = sink.send(Message::Text(serde_json::to_string(&reply).unwrap_or_default().into())).await.is_ok();
                             }
                         }
@@ -260,13 +359,33 @@ async fn client(app: Arc<App>, socket: WebSocket, home: bool, profile: Option<ac
             Some(message) = direct.recv() => {
                 send_ok = sink.send(Message::Text(serde_json::to_string(&message).unwrap_or_default().into())).await.is_ok();
             }
+            Some(media) = media_rx.recv() => {
+                send_ok = sink.send(Message::Binary(media.into())).await.is_ok();
+            }
         }
     }
 
-    if let Some(peer) = peer.take() {
-        peer.close().await;
-    }
+    watch.end().await;
     app.remove_viewer(id).await;
+}
+
+/// How this player is watching: a WebRTC peer at home, or the video inside
+/// the WebSocket from outside.
+#[derive(Default)]
+struct Watch {
+    peer: Option<ViewerPeer>,
+    media: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Watch {
+    async fn end(&mut self) {
+        if let Some(peer) = self.peer.take() {
+            peer.close().await;
+        }
+        if let Some(task) = self.media.take() {
+            task.abort();
+        }
+    }
 }
 
 /// Admin, or nobody has a profile yet (first setup at home).
@@ -286,10 +405,19 @@ fn admin_done(app: &Arc<App>, result: Result<()>) -> Option<Direct> {
 }
 
 fn error(message: impl std::fmt::Display) -> Option<Direct> {
-    Some(Direct::Error { message: message.to_string() })
+    Some(Direct::Error {
+        message: message.to_string(),
+    })
 }
 
-async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &mut Option<ViewerPeer>) -> Option<Direct> {
+async fn handle(
+    app: &Arc<App>,
+    id: u64,
+    home: bool,
+    message: FromPage,
+    watch: &mut Watch,
+    media_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> Option<Direct> {
     match message {
         FromPage::Login => app.login().await,
         FromPage::Logout => app.logout().await,
@@ -311,25 +439,39 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
         }
         FromPage::Stop => app.stop().await,
         FromPage::Offer { sdp } => {
-            if let Some(old) = peer.take() {
-                old.close().await;
-            }
+            watch.end().await;
             match viewer::connect(app, sdp).await {
                 Ok((new_peer, answer)) => {
-                    *peer = Some(new_peer);
+                    watch.peer = Some(new_peer);
                     app.start_watching(id);
                     return Some(Direct::Answer { sdp: answer });
                 }
                 Err(e) => return error(format!("Could not start the video: {e:#}")),
             }
         }
+        FromPage::Media => {
+            watch.end().await;
+            watch.media = Some(wsmedia::spawn(
+                app.clone(),
+                app.media.subscribe(),
+                media_tx.clone(),
+            ));
+            app.start_watching(id);
+        }
         FromPage::Leave => {
-            if let Some(old) = peer.take() {
-                old.close().await;
-            }
+            watch.end().await;
             app.stop_watching(id).await;
         }
-        FromPage::Pad { local, buttons, lx, ly, rx, ry, lt, rt } => {
+        FromPage::Pad {
+            local,
+            buttons,
+            lx,
+            ly,
+            rx,
+            ry,
+            lt,
+            rt,
+        } => {
             let clamp = |v: f64, lo: f64| if v.is_finite() { v.clamp(lo, 1.0) } else { 0.0 };
             let state = GamepadState {
                 index: 0,
@@ -344,10 +486,22 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
             app.set_pad(id, local, state).await;
         }
         FromPage::Unplug { local } => app.unplug_pad(id, local).await,
-        FromPage::Key { code, down } => app.send_key(KeyboardFrame { pressed: down, key_code: code }),
-        FromPage::Mouse { dx, dy, buttons, wheel } => {
-            app.send_mouse(MouseFrame { x: dx, y: dy, wheel_y: wheel, buttons, ..Default::default() })
-        }
+        FromPage::Key { code, down } => app.send_key(KeyboardFrame {
+            pressed: down,
+            key_code: code,
+        }),
+        FromPage::Mouse {
+            dx,
+            dy,
+            buttons,
+            wheel,
+        } => app.send_mouse(MouseFrame {
+            x: dx,
+            y: dy,
+            wheel_y: wheel,
+            buttons,
+            ..Default::default()
+        }),
         FromPage::Keyframe => app.request_keyframe(),
         FromPage::PlayitConnect | FromPage::PlayitDisconnect if !home || !is_admin(app, id) => {
             return error("Remote access can only be changed by an admin on your home network.");
@@ -363,13 +517,37 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
         {
             return error("Only an admin can change profiles.");
         }
-        FromPage::AdminCreate { name, password, admin } => return admin_done(app, app.access.create_profile(&name, &password, admin).await),
-        FromPage::AdminUpdate { id: profile, changes } => return admin_done(app, app.access.update_profile(&profile, changes).await),
-        FromPage::AdminDelete { id: profile } => return admin_done(app, app.access.delete_profile(&profile).await),
-        FromPage::AdminAnswer { id: request, approve } => return admin_done(app, app.access.answer_request(&request, approve).await),
-        FromPage::AdminAllowRequests { allow } => return admin_done(app, app.access.set_allow_requests(allow).await),
-        FromPage::AdminTimedPlay { enabled, minutes } => return admin_done(app, app.access.set_timed_play(enabled, minutes).await),
-        FromPage::AdminAnswerTime { id: request, approve } => app.answer_time(request, approve).await,
+        FromPage::AdminCreate {
+            name,
+            password,
+            admin,
+        } => {
+            return admin_done(
+                app,
+                app.access.create_profile(&name, &password, admin).await,
+            )
+        }
+        FromPage::AdminUpdate {
+            id: profile,
+            changes,
+        } => return admin_done(app, app.access.update_profile(&profile, changes).await),
+        FromPage::AdminDelete { id: profile } => {
+            return admin_done(app, app.access.delete_profile(&profile).await)
+        }
+        FromPage::AdminAnswer {
+            id: request,
+            approve,
+        } => return admin_done(app, app.access.answer_request(&request, approve).await),
+        FromPage::AdminAllowRequests { allow } => {
+            return admin_done(app, app.access.set_allow_requests(allow).await)
+        }
+        FromPage::AdminTimedPlay { enabled, minutes } => {
+            return admin_done(app, app.access.set_timed_play(enabled, minutes).await)
+        }
+        FromPage::AdminAnswerTime {
+            id: request,
+            approve,
+        } => app.answer_time(request, approve).await,
         FromPage::Turns { on } => app.set_turns(id, on),
         FromPage::RequestTime => return app.request_time(id),
         FromPage::PlayitConnect => app.playit.connect(),
@@ -384,19 +562,43 @@ mod tests {
 
     #[test]
     fn page_messages_parse() {
-        let pad: FromPage = serde_json::from_str(r#"{"t":"pad","local":1,"buttons":16,"lx":0.5,"ly":-1,"rx":0,"ry":0,"lt":0,"rt":1}"#).unwrap();
-        assert!(matches!(pad, FromPage::Pad { local: 1, buttons: 16, .. }));
+        let pad: FromPage = serde_json::from_str(
+            r#"{"t":"pad","local":1,"buttons":16,"lx":0.5,"ly":-1,"rx":0,"ry":0,"lt":0,"rt":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            pad,
+            FromPage::Pad {
+                local: 1,
+                buttons: 16,
+                ..
+            }
+        ));
         let start: FromPage = serde_json::from_str(r#"{"t":"start","id":"F400"}"#).unwrap();
         assert!(matches!(start, FromPage::Start { id } if id == "F400"));
-        assert!(matches!(serde_json::from_str::<FromPage>(r#"{"t":"keyframe"}"#).unwrap(), FromPage::Keyframe));
+        assert!(matches!(
+            serde_json::from_str::<FromPage>(r#"{"t":"keyframe"}"#).unwrap(),
+            FromPage::Keyframe
+        ));
     }
 
     #[test]
     fn direct_messages_have_the_shape_the_page_expects() {
-        let rumble = serde_json::to_value(Direct::Rumble { local: 0, left: 1.0, right: 0.5, left_trigger: 0.0, right_trigger: 0.0, ms: 100 }).unwrap();
+        let rumble = serde_json::to_value(Direct::Rumble {
+            local: 0,
+            left: 1.0,
+            right: 0.5,
+            left_trigger: 0.0,
+            right_trigger: 0.0,
+            ms: 100,
+        })
+        .unwrap();
         assert_eq!(rumble["t"], "rumble");
         assert_eq!(rumble["leftTrigger"], 0.0);
-        let answer = serde_json::to_value(Direct::Answer { sdp: "v=0".to_owned() }).unwrap();
+        let answer = serde_json::to_value(Direct::Answer {
+            sdp: "v=0".to_owned(),
+        })
+        .unwrap();
         assert_eq!(answer, serde_json::json!({ "t": "answer", "sdp": "v=0" }));
     }
 }

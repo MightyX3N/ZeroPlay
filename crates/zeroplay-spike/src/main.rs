@@ -22,7 +22,11 @@ use zeroplay_xbox::session::{start_home_session, Session, SessionEvent, StreamOp
 use commands::Command;
 
 #[derive(Parser)]
-#[command(name = "zeroplay-spike", version, about = "ZeroPlay milestone 0: test Xbox Remote Play from Rust")]
+#[command(
+    name = "zeroplay-spike",
+    version,
+    about = "ZeroPlay milestone 0: test Xbox Remote Play from Rust"
+)]
 struct Cli {
     /// Where the sign-in is saved. Defaults to the system config folder.
     #[arg(long, global = true)]
@@ -97,12 +101,19 @@ async fn run() -> Result<()> {
             println!("Asked {} to wake up.", console.name);
             Ok(())
         }
-        Action::Stream { console, video, audio, seconds } => stream(&mut auth, console, video, audio, seconds).await,
+        Action::Stream {
+            console,
+            video,
+            audio,
+            seconds,
+        } => stream(&mut auth, console, video, audio, seconds).await,
     }
 }
 
 fn reqwest_client() -> Result<zeroplay_xbox::reqwest::Client> {
-    Ok(zeroplay_xbox::reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?)
+    Ok(zeroplay_xbox::reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?)
 }
 
 async fn login(auth: &mut Auth) -> Result<()> {
@@ -113,7 +124,10 @@ async fn login(auth: &mut Auth) -> Result<()> {
     println!();
     println!("Waiting for you to finish signing in...");
     auth.finish_device_code(&code).await?;
-    println!("Signed in. The sign-in is saved in {}", auth.token_path().display());
+    println!(
+        "Signed in. The sign-in is saved in {}",
+        auth.token_path().display()
+    );
     Ok(())
 }
 
@@ -135,7 +149,11 @@ fn print_consoles(consoles: &[Console]) {
         println!("    power:       {}", console.power_state);
         println!(
             "    remote play: {}",
-            if console.console_streaming_enabled { "on" } else { "OFF (turn on remote features in the console's settings)" }
+            if console.console_streaming_enabled {
+                "on"
+            } else {
+                "OFF (turn on remote features in the console's settings)"
+            }
         );
     }
 }
@@ -147,14 +165,20 @@ fn pick_console<'a>(consoles: &'a [Console], wanted: Option<&str>) -> Result<&'a
             .find(|c| c.id.eq_ignore_ascii_case(wanted) || c.name.eq_ignore_ascii_case(wanted))
             .ok_or_else(|| {
                 let names: Vec<&str> = consoles.iter().map(|c| c.name.as_str()).collect();
-                anyhow!("no console called \"{wanted}\". Your consoles: {}", names.join(", "))
+                anyhow!(
+                    "no console called \"{wanted}\". Your consoles: {}",
+                    names.join(", ")
+                )
             }),
         None => match consoles {
             [] => bail!("no consoles found on this account"),
             [only] => Ok(only),
             many => {
                 let names: Vec<&str> = many.iter().map(|c| c.name.as_str()).collect();
-                bail!("you have several consoles, name one of them: {}", names.join(", "))
+                bail!(
+                    "you have several consoles, name one of them: {}",
+                    names.join(", ")
+                )
             }
         },
     }
@@ -172,7 +196,10 @@ async fn stream(
     }
     let consoles = list_consoles(auth).await?;
     let console = pick_console(&consoles, wanted.as_deref())?.clone();
-    println!("Console: {} ({}, power: {})", console.name, console.console_type, console.power_state);
+    println!(
+        "Console: {} ({}, power: {})",
+        console.name, console.console_type, console.power_state
+    );
     if !console.console_streaming_enabled {
         println!("Warning: remote features look switched off on this console. The stream will probably be refused.");
     }
@@ -180,9 +207,14 @@ async fn stream(
     let token = auth.home_streaming_token().await?;
     println!("Streaming region: {}", token.region);
     let api = HomeApi::new(&token)?;
-    let signaling = start_home_session(&api, auth, &console.id, &|line| println!("  {line}")).await?;
+    let signaling =
+        start_home_session(&api, auth, &console.id, &|line| println!("  {line}")).await?;
     println!("Connecting to the console...");
-    let options = StreamOptions { video_path: Some(video.clone()), audio_path: Some(audio.clone()), ..Default::default() };
+    let options = StreamOptions {
+        video_path: Some(video.clone()),
+        audio_path: Some(audio.clone()),
+        ..Default::default()
+    };
     let signaling = Arc::new(signaling);
     let mut session = match Session::connect(signaling.clone(), options).await {
         Ok(session) => session,
@@ -193,7 +225,11 @@ async fn stream(
             return Err(error);
         }
     };
-    println!("Connected. Video is saved to {} and sound to {}.", video.display(), audio.display());
+    println!(
+        "Connected. Video is saved to {} and sound to {}.",
+        video.display(),
+        audio.display()
+    );
     println!("Type `help` for the input commands, `quit` to stop.");
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -294,7 +330,11 @@ async fn stream(
 }
 
 fn pad_state(session: &Session, index: u8) -> GamepadState {
-    session.gamepads().into_iter().find(|p| p.index == index).unwrap_or_else(|| GamepadState::new(index))
+    session
+        .gamepads()
+        .into_iter()
+        .find(|p| p.index == index)
+        .unwrap_or_else(|| GamepadState::new(index))
 }
 
 const TAP: Duration = Duration::from_millis(150);
@@ -324,11 +364,19 @@ async fn apply(session: &Session, current_pad: &mut u8, command: Command) -> Res
         }
         Command::Trigger { right } => {
             let mut state = pad_state(session, *current_pad);
-            if right { state.right_trigger = 1.0 } else { state.left_trigger = 1.0 }
+            if right {
+                state.right_trigger = 1.0
+            } else {
+                state.left_trigger = 1.0
+            }
             session.set_gamepad(state).await?;
             tokio::time::sleep(TAP).await;
             let mut state = pad_state(session, *current_pad);
-            if right { state.right_trigger = 0.0 } else { state.left_trigger = 0.0 }
+            if right {
+                state.right_trigger = 0.0
+            } else {
+                state.left_trigger = 0.0
+            }
             session.set_gamepad(state).await?;
         }
         Command::Stick { right, x, y } => {
@@ -350,22 +398,43 @@ async fn apply(session: &Session, current_pad: &mut u8, command: Command) -> Res
         Command::Pad(index) => {
             *current_pad = index;
             session.set_gamepad(pad_state(session, index)).await?;
-            println!("Now controlling pad {} ({} plugged in)", index + 1, session.gamepads().len());
+            println!(
+                "Now controlling pad {} ({} plugged in)",
+                index + 1,
+                session.gamepads().len()
+            );
         }
         Command::Unplug(index) => {
             session.remove_gamepad(index).await?;
-            println!("Pad {} unplugged ({} plugged in)", index + 1, session.gamepads().len());
+            println!(
+                "Pad {} unplugged ({} plugged in)",
+                index + 1,
+                session.gamepads().len()
+            );
         }
         Command::Key(key_code) => {
-            session.send_key(KeyboardFrame { pressed: true, key_code });
+            session.send_key(KeyboardFrame {
+                pressed: true,
+                key_code,
+            });
             tokio::time::sleep(TAP).await;
-            session.send_key(KeyboardFrame { pressed: false, key_code });
+            session.send_key(KeyboardFrame {
+                pressed: false,
+                key_code,
+            });
         }
         Command::MouseMove { x, y } => {
-            session.send_mouse(MouseFrame { x, y, ..Default::default() });
+            session.send_mouse(MouseFrame {
+                x,
+                y,
+                ..Default::default()
+            });
         }
         Command::Click(buttons) => {
-            session.send_mouse(MouseFrame { buttons, ..Default::default() });
+            session.send_mouse(MouseFrame {
+                buttons,
+                ..Default::default()
+            });
             tokio::time::sleep(TAP).await;
             session.send_mouse(MouseFrame::default());
         }
@@ -399,8 +468,14 @@ mod tests {
     #[test]
     fn consoles_are_found_by_name_or_id() {
         let consoles = [console("Living room", "F4001"), console("Bedroom", "F4002")];
-        assert_eq!(pick_console(&consoles, Some("bedroom")).unwrap().id, "F4002");
-        assert_eq!(pick_console(&consoles, Some("f4001")).unwrap().name, "Living room");
+        assert_eq!(
+            pick_console(&consoles, Some("bedroom")).unwrap().id,
+            "F4002"
+        );
+        assert_eq!(
+            pick_console(&consoles, Some("f4001")).unwrap().name,
+            "Living room"
+        );
     }
 
     #[test]
@@ -408,7 +483,9 @@ mod tests {
         let consoles = [console("Living room", "F4001"), console("Bedroom", "F4002")];
         let error = pick_console(&consoles, None).unwrap_err().to_string();
         assert!(error.contains("Living room") && error.contains("Bedroom"));
-        let error = pick_console(&consoles, Some("Kitchen")).unwrap_err().to_string();
+        let error = pick_console(&consoles, Some("Kitchen"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Kitchen") && error.contains("Bedroom"));
         assert!(pick_console(&[], None).is_err());
     }

@@ -24,7 +24,10 @@ pub fn parse(address: &str) -> Option<TeredoClient> {
     let port = !s[5];
     let hi = (!s[6]).to_be_bytes();
     let lo = (!s[7]).to_be_bytes();
-    Some(TeredoClient { ipv4: Ipv4Addr::new(hi[0], hi[1], lo[0], lo[1]), port })
+    Some(TeredoClient {
+        ipv4: Ipv4Addr::new(hi[0], hi[1], lo[0], lo[1]),
+        port,
+    })
 }
 
 #[cfg(test)]

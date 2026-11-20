@@ -221,11 +221,16 @@ $("btn-ms-signout").onclick = () => {
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     const name = localStorage.getItem("zp-name");
     if (name) send({ t: "name", name });
   };
   ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      if (feed) feed.push(event.data);
+      return;
+    }
     const message = JSON.parse(event.data);
     if (message.t === "status") onStatus(message);
     else if (message.t === "answer") onAnswer(message.sdp);
@@ -457,23 +462,160 @@ let stalled = 0;
 let lastBytes = 0;
 let lastStatsAt = 0;
 
-function watching() { return pc !== null; }
+function watching() { return pc !== null || feed !== null; }
+
+// Outside the home the video and sound come inside the page's own connection
+// (one tunnel for everything) and the browser decodes them itself.
+function useFeed() {
+  return !!(status && status.you && !status.you.home) && typeof VideoDecoder !== "undefined";
+}
+
+function playStream(media) {
+  const video = $("video");
+  if (video.srcObject !== media) video.srcObject = media;
+  applyAudio();
+  video.play().catch(() => {
+    video.dataset.autoplayMuted = "1";
+    video.muted = true;
+    video.play().catch(() => {});
+    show($("tap-to-play"), true);
+  });
+}
+
+let feed = null;
+
+class Feed {
+  constructor() {
+    this.canvas = $("feed-canvas");
+    this.ctx2d = this.canvas.getContext("2d");
+    this.media = this.canvas.captureStream();
+    this.frames = 0;
+    this.bytes = 0;
+    this.height = 0;
+    this.codec = null;
+    this.waitKey = true;
+    this.video = null;
+    this.audio = null;
+    this.audioCtx = null;
+    this.nextAudio = 0;
+    if (typeof AudioDecoder !== "undefined") {
+      try {
+        this.audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
+        const out = this.audioCtx.createMediaStreamDestination();
+        this.audioOut = out;
+        out.stream.getAudioTracks().forEach((t) => this.media.addTrack(t));
+        this.audio = new AudioDecoder({ output: (data) => this.play(data), error: () => {} });
+        this.audio.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 2 });
+      } catch {
+        this.audio = null;
+      }
+    }
+    if (!this.audio) toast("This browser cannot play the sound from outside the home (it needs a newer version).");
+    playStream(this.media);
+  }
+
+  push(buffer) {
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length < 6) return;
+    this.bytes += bytes.length;
+    const kind = bytes[0];
+    const key = bytes[1] === 1;
+    const data = bytes.subarray(6);
+    const timestamp = Math.round(performance.now() * 1000);
+    if (kind === 1) this.pushVideo(data, key, timestamp);
+    else if (kind === 2 && this.audio && this.audio.state === "configured") {
+      try { this.audio.decode(new EncodedAudioChunk({ type: "key", timestamp, data })); } catch {}
+    }
+  }
+
+  pushVideo(data, key, timestamp) {
+    if (key) {
+      const codec = avcCodec(data);
+      if (codec && codec !== this.codec) {
+        if (this.video) try { this.video.close(); } catch {}
+        this.video = new VideoDecoder({
+          output: (frame) => this.draw(frame),
+          error: () => { this.codec = null; this.waitKey = true; send({ t: "keyframe" }); },
+        });
+        this.video.configure({ codec, optimizeForLatency: true });
+        this.codec = codec;
+      }
+      this.waitKey = false;
+    }
+    if (this.waitKey || !this.video || this.video.state !== "configured") return;
+    // Too far behind: skip to the next key frame instead of lagging.
+    if (this.video.decodeQueueSize > 6) { this.waitKey = true; send({ t: "keyframe" }); return; }
+    try {
+      this.video.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp, data }));
+    } catch {
+      this.waitKey = true;
+      send({ t: "keyframe" });
+    }
+  }
+
+  draw(frame) {
+    if (this.canvas.width !== frame.displayWidth || this.canvas.height !== frame.displayHeight) {
+      this.canvas.width = frame.displayWidth;
+      this.canvas.height = frame.displayHeight;
+    }
+    this.ctx2d.drawImage(frame, 0, 0);
+    this.height = frame.displayHeight;
+    this.frames++;
+    frame.close();
+  }
+
+  play(data) {
+    const ctx = this.audioCtx;
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    const buffer = ctx.createBuffer(data.numberOfChannels, data.numberOfFrames, data.sampleRate);
+    for (let c = 0; c < data.numberOfChannels; c++) {
+      const plane = new Float32Array(data.numberOfFrames);
+      data.copyTo(plane, { planeIndex: c, format: "f32-planar" });
+      buffer.copyToChannel(plane, c);
+    }
+    data.close();
+    const now = ctx.currentTime;
+    // Keep the sound close behind: restart the schedule when it drifts.
+    if (this.nextAudio < now + 0.02 || this.nextAudio > now + 0.25) this.nextAudio = now + 0.04;
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.audioOut);
+    source.start(this.nextAudio);
+    this.nextAudio += buffer.duration;
+  }
+
+  close() {
+    for (const decoder of [this.video, this.audio]) if (decoder) try { decoder.close(); } catch {}
+    if (this.audioCtx) this.audioCtx.close().catch(() => {});
+    this.media.getTracks().forEach((t) => t.stop());
+  }
+}
+
+// "avc1.PPCCLL" from the SPS in an Annex B frame.
+function avcCodec(data) {
+  for (let i = 0; i + 7 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1 && (data[i + 3] & 0x1f) === 7) {
+      const hex = (b) => b.toString(16).padStart(2, "0");
+      return `avc1.${hex(data[i + 4])}${hex(data[i + 5])}${hex(data[i + 6])}`;
+    }
+  }
+  return null;
+}
 
 async function startWatching() {
+  if (useFeed()) {
+    feed = new Feed();
+    lastFrames = -1;
+    stalled = 0;
+    send({ t: "media" });
+    return;
+  }
   pc = new RTCPeerConnection();
   const mine = pc;
   const media = new MediaStream();
   pc.ontrack = (event) => {
     media.addTrack(event.track);
-    const video = $("video");
-    if (video.srcObject !== media) video.srcObject = media;
-    applyAudio();
-    video.play().catch(() => {
-      video.dataset.autoplayMuted = "1";
-      video.muted = true;
-      video.play().catch(() => {});
-      show($("tap-to-play"), true);
-    });
+    playStream(media);
   };
   pc.onconnectionstatechange = () => {
     if (mine.connectionState === "failed") toast("The video connection failed. Check the media ports (ZEROPLAY_RTC_PORTS) are reachable.");
@@ -506,9 +648,11 @@ async function onAnswer(sdp) {
 
 function stopWatching() {
   stopRecording();
-  if (pc) {
-    pc.close();
+  if (pc || feed) {
+    if (pc) pc.close();
+    if (feed) feed.close();
     pc = null;
+    feed = null;
     send({ t: "leave" });
   }
   $("video").srcObject = null;
@@ -521,10 +665,34 @@ $("btn-unmute").onclick = () => {
   delete video.dataset.autoplayMuted;
   video.muted = muted;
   video.play().catch(() => {});
+  if (feed && feed.audioCtx) feed.audioCtx.resume().catch(() => {});
   show($("tap-to-play"), false);
 };
 
 // Ask for a fresh picture if the video stops moving, and keep the stats up to date.
+function showStats(height, fps, mbps) {
+  const parts = [];
+  if (height) parts.push(`${height}p`);
+  if (fps) parts.push(`${Math.round(fps)} fps`);
+  parts.push(`${mbps.toFixed(1)} Mbps`);
+  $("stats").replaceChildren(...parts.map((p) => { const s = document.createElement("span"); s.textContent = p; return s; }));
+}
+
+setInterval(() => {
+  if (!feed) return;
+  const frames = feed.frames;
+  if (status && status.stream.state === "live" && frames === lastFrames) {
+    stalled++;
+    if (stalled >= 2) { send({ t: "keyframe" }); feed.waitKey = true; stalled = 0; }
+  } else {
+    stalled = 0;
+  }
+  const fps = lastFrames >= 0 ? frames - lastFrames : 0;
+  lastFrames = frames;
+  showStats(feed.height, fps, (feed.bytes * 8) / 1e6);
+  feed.bytes = 0;
+}, 1000);
+
 setInterval(async () => {
   if (!pc) return;
   const report = await pc.getStats();
@@ -542,11 +710,7 @@ setInterval(async () => {
     const mbps = lastStatsAt ? ((r.bytesReceived - lastBytes) * 8) / ((now - lastStatsAt) * 1000) : 0;
     lastBytes = r.bytesReceived;
     lastStatsAt = now;
-    const parts = [];
-    if (r.frameHeight) parts.push(`${r.frameHeight}p`);
-    if (r.framesPerSecond) parts.push(`${Math.round(r.framesPerSecond)} fps`);
-    parts.push(`${mbps.toFixed(1)} Mbps`);
-    $("stats").replaceChildren(...parts.map((p) => { const s = document.createElement("span"); s.textContent = p; return s; }));
+    showStats(r.frameHeight, r.framesPerSecond, mbps);
   });
 }, 1000);
 
@@ -748,7 +912,7 @@ function combine(states) {
 let mergedWasActive = false;
 
 function pollPads() {
-  const inStream = pc !== null && !$("stream").classList.contains("hidden");
+  const inStream = watching() && !$("stream").classList.contains("hidden");
   const playing = inStream && !menuOpen;
   const states = new Map(); // local index → state, for this tick
   let combo = false;

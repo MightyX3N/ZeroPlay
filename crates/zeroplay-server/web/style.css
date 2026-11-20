@@ -95,6 +95,7 @@ svg.fill { fill: currentColor; stroke: none; }
 /* Stream */
 #stream { background: #000; }
 #video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+#feed-canvas { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
 .stats { position: absolute; top: max(16px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right)); display: flex; gap: 8px; font-size: 12px; }
 .stats span { background: rgba(0,0,0,.6); padding: 6px 12px; border-radius: 999px; }
 .mouse-hint { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); background: rgba(0,0,0,.7); padding: 8px 16px; border-radius: 999px; font-size: 13px; pointer-events: none; }

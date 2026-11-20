@@ -30,10 +30,17 @@ impl Config {
             .unwrap_or_else(|| "127.0.0.1:8081".to_owned())
             .parse()
             .context("ZEROPLAY_REMOTE_HTTP must look like 127.0.0.1:8081")?;
-        let data_dir = PathBuf::from(var("ZEROPLAY_DATA").unwrap_or_else(|| "zeroplay-data".to_owned()));
-        let rtc_ports = parse_ports(&var("ZEROPLAY_RTC_PORTS").unwrap_or_else(|| "50000-50009".to_owned()))
-            .context("ZEROPLAY_RTC_PORTS must look like 50000-50009")?;
-        Ok(Config { http_addr, remote_addr, data_dir, rtc_ports })
+        let data_dir =
+            PathBuf::from(var("ZEROPLAY_DATA").unwrap_or_else(|| "zeroplay-data".to_owned()));
+        let rtc_ports =
+            parse_ports(&var("ZEROPLAY_RTC_PORTS").unwrap_or_else(|| "50000-50009".to_owned()))
+                .context("ZEROPLAY_RTC_PORTS must look like 50000-50009")?;
+        Ok(Config {
+            http_addr,
+            remote_addr,
+            data_dir,
+            rtc_ports,
+        })
     }
 }
 
@@ -69,7 +76,10 @@ mod tests {
 
     #[test]
     fn port_ranges_and_lists() {
-        assert_eq!(parse_ports("50000-50002").unwrap(), vec![50000, 50001, 50002]);
+        assert_eq!(
+            parse_ports("50000-50002").unwrap(),
+            vec![50000, 50001, 50002]
+        );
         assert_eq!(parse_ports("50000, 50004").unwrap(), vec![50000, 50004]);
         assert!(parse_ports("50002-50000").is_err());
         assert!(parse_ports("").is_err());

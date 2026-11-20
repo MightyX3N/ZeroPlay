@@ -61,8 +61,10 @@ Home Screen*. ZeroPlay then opens full screen like an app (log in once more
 there; it keeps its own login). Android and desktop Chrome/Edge offer
 *Install* as well.
 
-With a free playit account the video tunnel gets one port, so one player at a
-time can stream from outside the home; playit premium allows more.
+From outside the home everything goes through one playit tunnel: the video
+and sound travel inside the page's own connection and the browser decodes
+them (Safari 16.4+, Chrome, Edge, Firefox 130+). At home the video goes
+straight over the home network.
 
 In the browser: controllers work as soon as they are plugged in, as one
 console slot. All controllers, the keyboard and the mouse in one browser are

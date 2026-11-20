@@ -18,12 +18,15 @@ use rtc::media::io::h26x_writer::H26xWriter;
 use rtc::media::io::ogg_writer::OggWriter;
 use rtc::media::io::Writer;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
+use rtc::peer_connection::configuration::media_engine::{
+    MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS,
+};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
+    RTCRtpEncodingParameters, RtpCodecKind,
 };
 use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use serde_json::{json, Value};
@@ -89,7 +92,9 @@ pub async fn start_home_session(
     status: &(dyn Fn(&str) + Send + Sync),
 ) -> Result<HomeSignaling> {
     let session_id = api.start(console_id).await?;
-    status(&format!("session {session_id} created, waiting for the console"));
+    status(&format!(
+        "session {session_id} created, waiting for the console"
+    ));
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut authorized = false;
     loop {
@@ -110,7 +115,10 @@ pub async fn start_home_session(
             }
             SessionState::Provisioned => {
                 status("console is ready");
-                return Ok(HomeSignaling { api: api.clone(), session_id });
+                return Ok(HomeSignaling {
+                    api: api.clone(),
+                    session_id,
+                });
             }
             SessionState::Failed(details) => {
                 let _ = api.stop(&session_id).await;
@@ -148,12 +156,18 @@ pub enum SessionEvent {
     Connection(String),
     /// The console accepted our handshake. Input works from here on.
     Ready,
-    VideoSize { width: u32, height: u32 },
+    VideoSize {
+        width: u32,
+        height: u32,
+    },
     Vibration(Vibration),
     /// The console told us which game or app is in front.
     TitleInfo(String),
     /// A message from the console we do not act on.
-    ServerMessage { target: String, content: String },
+    ServerMessage {
+        target: String,
+        content: String,
+    },
     /// The console ended the stream.
     Disconnected(String),
 }
@@ -206,7 +220,10 @@ impl Shared {
 
 async fn send_json(channel: &Arc<dyn DataChannel>, text: String) -> Result<()> {
     // Greenlight sends JSON as binary messages, so we do too.
-    channel.send(BytesMut::from(text.as_bytes())).await.map_err(|e| anyhow!("{e}"))
+    channel
+        .send(BytesMut::from(text.as_bytes()))
+        .await
+        .map_err(|e| anyhow!("{e}"))
 }
 
 // ── Protocol messages (pure functions, see the tests) ───────────────────────
@@ -251,14 +268,26 @@ fn wrap_message(target: &str, content: Value) -> String {
 /// What the client tells the console about itself right after the handshake.
 fn config_messages() -> Vec<String> {
     vec![
-        wrap_message("/streaming/systemUi/configuration", json!({ "version": [0, 2, 0], "systemUis": [] })),
+        wrap_message(
+            "/streaming/systemUi/configuration",
+            json!({ "version": [0, 2, 0], "systemUis": [] }),
+        ),
         wrap_message(
             "/streaming/properties/clientappinstallidchanged",
             json!({ "clientAppInstallId": "c97d7ee0-73b2-4239-bf1d-9d805a338429" }),
         ),
-        wrap_message("/streaming/characteristics/orientationchanged", json!({ "orientation": 0 })),
-        wrap_message("/streaming/characteristics/touchinputenabledchanged", json!({ "touchInputEnabled": false })),
-        wrap_message("/streaming/characteristics/clientdevicecapabilities", json!({})),
+        wrap_message(
+            "/streaming/characteristics/orientationchanged",
+            json!({ "orientation": 0 }),
+        ),
+        wrap_message(
+            "/streaming/characteristics/touchinputenabledchanged",
+            json!({ "touchInputEnabled": false }),
+        ),
+        wrap_message(
+            "/streaming/characteristics/clientdevicecapabilities",
+            json!({}),
+        ),
         wrap_message(
             "/streaming/characteristics/dimensionschanged",
             json!({
@@ -277,7 +306,8 @@ fn config_messages() -> Vec<String> {
 }
 
 fn transaction_complete_message(id: &Value, content: Value) -> String {
-    json!({ "type": "TransactionComplete", "content": content.to_string(), "id": id, "cv": "" }).to_string()
+    json!({ "type": "TransactionComplete", "content": content.to_string(), "id": id, "cv": "" })
+        .to_string()
 }
 
 /// A remote candidate ready to hand to the peer connection.
@@ -322,7 +352,10 @@ fn expand_remote_candidates(remote: &[IceCandidate]) -> Vec<RemoteCandidate> {
         if let Some(client) = parts.get(4).and_then(|address| teredo::parse(address)) {
             for (foundation, port) in [(10, 9002), (11, client.port)] {
                 out.push(RemoteCandidate {
-                    candidate: format!("candidate:{foundation} 1 UDP 1 {} {port} typ host", client.ipv4),
+                    candidate: format!(
+                        "candidate:{foundation} 1 UDP 1 {} {port} typ host",
+                        client.ipv4
+                    ),
                     sdp_mid: sdp_mid.clone(),
                     sdp_mline_index,
                 });
@@ -370,7 +403,10 @@ struct Handler {
 impl PeerConnectionEventHandler for Handler {
     async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
         if let Ok(init) = event.candidate.to_json() {
-            self.local_candidates.lock().unwrap().push(local_candidate_json(&init));
+            self.local_candidates
+                .lock()
+                .unwrap()
+                .push(local_candidate_json(&init));
         }
     }
 
@@ -382,7 +418,8 @@ impl PeerConnectionEventHandler for Handler {
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
         *self.connection_state.lock().unwrap() = state;
-        self.shared.emit(SessionEvent::Connection(state.to_string()));
+        self.shared
+            .emit(SessionEvent::Connection(state.to_string()));
         self.connection_changed.notify_one();
     }
 
@@ -405,8 +442,14 @@ impl PeerConnectionEventHandler for Handler {
                 tokio::spawn(async move {
                     while let Some(event) = track.poll().await {
                         if let TrackRemoteEvent::OnRtpPacket(packet) = event {
-                            shared.counters.video_packets.fetch_add(1, Ordering::Relaxed);
-                            shared.counters.video_bytes.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
+                            shared
+                                .counters
+                                .video_packets
+                                .fetch_add(1, Ordering::Relaxed);
+                            shared
+                                .counters
+                                .video_bytes
+                                .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                             if let Some(w) = writer.as_mut() {
                                 let _ = w.write_rtp(&packet);
                             }
@@ -422,9 +465,10 @@ impl PeerConnectionEventHandler for Handler {
             }
             RtpCodecKind::Audio => {
                 let mut writer = match &self.options.audio_path {
-                    Some(path) => match std::fs::File::create(path).map_err(anyhow::Error::from).and_then(|file| {
-                        OggWriter::new(file, 48000, 2).map_err(|e| anyhow!("{e}"))
-                    }) {
+                    Some(path) => match std::fs::File::create(path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|file| OggWriter::new(file, 48000, 2).map_err(|e| anyhow!("{e}")))
+                    {
                         Ok(writer) => Some(writer),
                         Err(error) => {
                             eprintln!("could not create {}: {error}", path.display());
@@ -437,8 +481,14 @@ impl PeerConnectionEventHandler for Handler {
                 tokio::spawn(async move {
                     while let Some(event) = track.poll().await {
                         if let TrackRemoteEvent::OnRtpPacket(packet) = event {
-                            shared.counters.audio_packets.fetch_add(1, Ordering::Relaxed);
-                            shared.counters.audio_bytes.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
+                            shared
+                                .counters
+                                .audio_packets
+                                .fetch_add(1, Ordering::Relaxed);
+                            shared
+                                .counters
+                                .audio_bytes
+                                .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                             if let Some(w) = writer.as_mut() {
                                 let _ = w.write_rtp(&packet);
                             }
@@ -471,16 +521,31 @@ fn media_engine() -> Result<MediaEngine> {
     let mut engine = MediaEngine::default();
     engine
         .register_codec(
-            RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: 111 },
+            RTCRtpCodecParameters {
+                rtp_codec: opus_codec(),
+                payload_type: 111,
+            },
             RtpCodecKind::Audio,
         )
         .map_err(|e| anyhow!("{e}"))?;
 
     let feedback = vec![
-        RTCPFeedback { typ: "goog-remb".to_owned(), parameter: String::new() },
-        RTCPFeedback { typ: "ccm".to_owned(), parameter: "fir".to_owned() },
-        RTCPFeedback { typ: "nack".to_owned(), parameter: String::new() },
-        RTCPFeedback { typ: "nack".to_owned(), parameter: "pli".to_owned() },
+        RTCPFeedback {
+            typ: "goog-remb".to_owned(),
+            parameter: String::new(),
+        },
+        RTCPFeedback {
+            typ: "ccm".to_owned(),
+            parameter: "fir".to_owned(),
+        },
+        RTCPFeedback {
+            typ: "nack".to_owned(),
+            parameter: String::new(),
+        },
+        RTCPFeedback {
+            typ: "nack".to_owned(),
+            parameter: "pli".to_owned(),
+        },
     ];
     // Same preference order as Greenlight: main profile, then the two baseline ones.
     for (payload_type, profile) in [(102u8, "4d001f"), (106, "42e01f"), (108, "42001f")] {
@@ -506,7 +571,11 @@ fn media_engine() -> Result<MediaEngine> {
 }
 
 fn channel_init(protocol: &str) -> Option<RTCDataChannelInit> {
-    Some(RTCDataChannelInit { ordered: true, protocol: protocol.to_owned(), ..Default::default() })
+    Some(RTCDataChannelInit {
+        ordered: true,
+        protocol: protocol.to_owned(),
+        ..Default::default()
+    })
 }
 
 /// A connected stream. Dropping it does not end the session; call [`Session::close`].
@@ -545,7 +614,8 @@ impl Session {
         });
 
         let mut engine = media_engine()?;
-        let registry = register_default_interceptors(Registry::new(), &mut engine).map_err(|e| anyhow!("{e}"))?;
+        let registry = register_default_interceptors(Registry::new(), &mut engine)
+            .map_err(|e| anyhow!("{e}"))?;
         let peer = PeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
             .with_media_engine(engine)
@@ -589,28 +659,61 @@ impl Session {
         .map_err(|e| anyhow!("could not add the video line: {e}"))?;
 
         // Same four channels, in the same order, as Greenlight.
-        let chat = peer.create_data_channel("chat", channel_init("chatV1")).await.map_err(|e| anyhow!("{e}"))?;
-        let control = peer.create_data_channel("control", channel_init("controlV1")).await.map_err(|e| anyhow!("{e}"))?;
-        let input = peer.create_data_channel("input", channel_init("1.0")).await.map_err(|e| anyhow!("{e}"))?;
-        let message = peer.create_data_channel("message", channel_init("messageV1")).await.map_err(|e| anyhow!("{e}"))?;
-        let channels = Arc::new(Channels { control, input, message });
+        let chat = peer
+            .create_data_channel("chat", channel_init("chatV1"))
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let control = peer
+            .create_data_channel("control", channel_init("controlV1"))
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let input = peer
+            .create_data_channel("input", channel_init("1.0"))
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let message = peer
+            .create_data_channel("message", channel_init("messageV1"))
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let channels = Arc::new(Channels {
+            control,
+            input,
+            message,
+        });
 
         let mut tasks = Vec::new();
-        tasks.push(tokio::spawn(async move { while chat.poll().await.is_some() {} }));
+        tasks.push(tokio::spawn(
+            async move { while chat.poll().await.is_some() {} },
+        ));
         tasks.push(tokio::spawn(run_control_channel(channels.clone())));
-        tasks.push(tokio::spawn(run_input_channel(shared.clone(), channels.clone())));
-        tasks.push(tokio::spawn(run_message_channel(shared.clone(), channels.clone())));
+        tasks.push(tokio::spawn(run_input_channel(
+            shared.clone(),
+            channels.clone(),
+        )));
+        tasks.push(tokio::spawn(run_message_channel(
+            shared.clone(),
+            channels.clone(),
+        )));
 
-        let offer = peer.create_offer(None).await.map_err(|e| anyhow!("could not create the offer: {e}"))?;
+        let offer = peer
+            .create_offer(None)
+            .await
+            .map_err(|e| anyhow!("could not create the offer: {e}"))?;
         let offer_sdp = request_stereo(&offer.sdp);
-        peer.set_local_description(offer).await.map_err(|e| anyhow!("could not apply the offer: {e}"))?;
+        peer.set_local_description(offer)
+            .await
+            .map_err(|e| anyhow!("could not apply the offer: {e}"))?;
 
         let answer_sdp = signaling.exchange_sdp(&offer_sdp).await?;
-        let answer = RTCSessionDescription::answer(answer_sdp).map_err(|e| anyhow!("the console's SDP answer is invalid: {e}"))?;
-        peer.set_remote_description(answer).await.map_err(|e| anyhow!("could not apply the console's answer: {e}"))?;
+        let answer = RTCSessionDescription::answer(answer_sdp)
+            .map_err(|e| anyhow!("the console's SDP answer is invalid: {e}"))?;
+        peer.set_remote_description(answer)
+            .await
+            .map_err(|e| anyhow!("could not apply the console's answer: {e}"))?;
 
         // Give candidate gathering a moment, then send whatever we have.
-        let _ = tokio::time::timeout(Duration::from_secs(5), handler.gathering_done.notified()).await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), handler.gathering_done.notified()).await;
         let local = handler.local_candidates.lock().unwrap().clone();
         if local.is_empty() {
             bail!("no local network candidates were found; is this device online?");
@@ -630,7 +733,10 @@ impl Session {
             };
             match peer.add_ice_candidate(init).await {
                 Ok(()) => accepted += 1,
-                Err(error) => eprintln!("skipped a candidate from the console ({}): {error}", candidate.candidate),
+                Err(error) => eprintln!(
+                    "skipped a candidate from the console ({}): {error}",
+                    candidate.candidate
+                ),
             }
         }
         if accepted == 0 {
@@ -656,10 +762,23 @@ impl Session {
             let _ = tokio::time::timeout(left, handler.connection_changed.notified()).await;
         }
 
-        tasks.push(tokio::spawn(run_input_loop(shared.clone(), channels.clone())));
-        tasks.push(tokio::spawn(run_keepalive(shared.clone(), signaling.clone())));
+        tasks.push(tokio::spawn(run_input_loop(
+            shared.clone(),
+            channels.clone(),
+        )));
+        tasks.push(tokio::spawn(run_keepalive(
+            shared.clone(),
+            signaling.clone(),
+        )));
 
-        Ok(Session { shared, channels, peer, signaling, events: Some(events), tasks })
+        Ok(Session {
+            shared,
+            channels,
+            peer,
+            signaling,
+            events: Some(events),
+            tasks,
+        })
     }
 
     /// The next thing that happened, or `None` once the session is gone.
@@ -696,7 +815,11 @@ impl Session {
             is_new
         };
         if is_new && self.is_ready() {
-            send_json(&self.channels.control, gamepad_changed_message(state.index, true)).await?;
+            send_json(
+                &self.channels.control,
+                gamepad_changed_message(state.index, true),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -708,14 +831,25 @@ impl Session {
             None => false,
         };
         if was_there && self.is_ready() {
-            send_json(&self.channels.control, gamepad_changed_message(index, false)).await?;
+            send_json(
+                &self.channels.control,
+                gamepad_changed_message(index, false),
+            )
+            .await?;
         }
         Ok(())
     }
 
     /// The gamepad slots that are plugged in right now.
     pub fn gamepads(&self) -> Vec<GamepadState> {
-        self.shared.pads.lock().unwrap().iter().flatten().copied().collect()
+        self.shared
+            .pads
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .copied()
+            .collect()
     }
 
     /// Queues a real mouse report (for games that support mouse and keyboard).
@@ -759,7 +893,10 @@ impl Session {
             task.abort();
         }
         let _ = self.peer.close().await;
-        self.signaling.stop().await.context("the stream is closed here, but telling the console failed")
+        self.signaling
+            .stop()
+            .await
+            .context("the stream is closed here, but telling the console failed")
     }
 }
 
@@ -774,9 +911,14 @@ async fn run_control_channel(channels: Arc<Channels>) {
 async fn run_input_channel(shared: Arc<Shared>, channels: Arc<Channels>) {
     while let Some(event) = channels.input.poll().await {
         match event {
-            DataChannelEvent::OnMessage(message) => match input::parse_server_report(&message.data) {
-                Some(ServerReport::Vibration(vibration)) => shared.emit(SessionEvent::Vibration(vibration)),
-                Some(ServerReport::VideoSize { width, height }) => shared.emit(SessionEvent::VideoSize { width, height }),
+            DataChannelEvent::OnMessage(message) => match input::parse_server_report(&message.data)
+            {
+                Some(ServerReport::Vibration(vibration)) => {
+                    shared.emit(SessionEvent::Vibration(vibration))
+                }
+                Some(ServerReport::VideoSize { width, height }) => {
+                    shared.emit(SessionEvent::VideoSize { width, height })
+                }
                 None => {}
             },
             DataChannelEvent::OnClose => break,
@@ -794,7 +936,9 @@ async fn run_message_channel(shared: Arc<Shared>, channels: Arc<Channels>) {
                 }
             }
             DataChannelEvent::OnMessage(message) => {
-                let Ok(data) = serde_json::from_slice::<Value>(&message.data) else { continue };
+                let Ok(data) = serde_json::from_slice::<Value>(&message.data) else {
+                    continue;
+                };
                 if let Err(error) = handle_message(&shared, &channels, &data).await {
                     eprintln!("could not answer the console: {error}");
                 }
@@ -805,7 +949,11 @@ async fn run_message_channel(shared: Arc<Shared>, channels: Arc<Channels>) {
     }
 }
 
-async fn handle_message(shared: &Arc<Shared>, channels: &Arc<Channels>, data: &Value) -> Result<()> {
+async fn handle_message(
+    shared: &Arc<Shared>,
+    channels: &Arc<Channels>,
+    data: &Value,
+) -> Result<()> {
     let kind = data.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
         "HandshakeAck" => {
@@ -815,12 +963,23 @@ async fn handle_message(shared: &Arc<Shared>, channels: &Arc<Channels>, data: &V
             send_json(&channels.control, gamepad_changed_message(0, true)).await?;
             send_json(&channels.control, gamepad_changed_message(0, false)).await?;
             let first = input::client_metadata_packet(0, shared.now_ms(), 1);
-            channels.input.send(BytesMut::from(&first[..])).await.map_err(|e| anyhow!("{e}"))?;
+            channels
+                .input
+                .send(BytesMut::from(&first[..]))
+                .await
+                .map_err(|e| anyhow!("{e}"))?;
             for message in config_messages() {
                 send_json(&channels.message, message).await?;
             }
             // Announce the pads that were plugged in before the handshake.
-            let plugged: Vec<u8> = shared.pads.lock().unwrap().iter().flatten().map(|p| p.index).collect();
+            let plugged: Vec<u8> = shared
+                .pads
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .map(|p| p.index)
+                .collect();
             for index in plugged {
                 send_json(&channels.control, gamepad_changed_message(index, true)).await?;
             }
@@ -828,18 +987,34 @@ async fn handle_message(shared: &Arc<Shared>, channels: &Arc<Channels>, data: &V
             shared.emit(SessionEvent::Ready);
         }
         "TransactionStart" | "Message" => {
-            let target = data.get("target").and_then(Value::as_str).unwrap_or("").to_owned();
-            let content = data.get("content").and_then(Value::as_str).unwrap_or("").to_owned();
+            let target = data
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let content = data
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             let id = data.get("id").cloned().unwrap_or(Value::Null);
             match target.as_str() {
                 "/streaming/sessionLifetimeManagement/serverInitiatedDisconnect" => {
-                    send_json(&channels.message, transaction_complete_message(&id, json!(""))).await?;
+                    send_json(
+                        &channels.message,
+                        transaction_complete_message(&id, json!("")),
+                    )
+                    .await?;
                     shared.emit(SessionEvent::Disconnected(content));
                 }
                 "/streaming/properties/titleinfo" => shared.emit(SessionEvent::TitleInfo(content)),
                 "/streaming/systemUi/messages/ShowMessageDialog" => {
                     // Answer "OK" so the console does not wait on a dialog nobody can see.
-                    send_json(&channels.message, transaction_complete_message(&id, json!({ "Result": 0 }))).await?;
+                    send_json(
+                        &channels.message,
+                        transaction_complete_message(&id, json!({ "Result": 0 })),
+                    )
+                    .await?;
                     shared.emit(SessionEvent::ServerMessage { target, content });
                 }
                 _ => shared.emit(SessionEvent::ServerMessage { target, content }),
@@ -862,16 +1037,33 @@ async fn run_input_loop(shared: Arc<Shared>, channels: Arc<Channels>) {
         if !shared.ready.load(Ordering::Relaxed) {
             continue;
         }
-        let pads: Vec<GamepadState> = shared.pads.lock().unwrap().iter().flatten().copied().collect();
+        let pads: Vec<GamepadState> = shared
+            .pads
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
         let mouse = std::mem::take(&mut *shared.mouse.lock().unwrap());
         let keys = std::mem::take(&mut *shared.keys.lock().unwrap());
         let sequence = shared.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let Some(packet) = input::input_packet(sequence, shared.now_ms(), &[], &pads, &mouse, &keys) else {
+        let Some(packet) =
+            input::input_packet(sequence, shared.now_ms(), &[], &pads, &mouse, &keys)
+        else {
             shared.sequence.fetch_sub(1, Ordering::Relaxed);
             continue;
         };
-        if channels.input.send(BytesMut::from(&packet[..])).await.is_ok() {
-            shared.counters.input_packets_sent.fetch_add(1, Ordering::Relaxed);
+        if channels
+            .input
+            .send(BytesMut::from(&packet[..]))
+            .await
+            .is_ok()
+        {
+            shared
+                .counters
+                .input_packets_sent
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -893,12 +1085,18 @@ mod tests {
     use super::*;
 
     fn candidate(text: &str) -> IceCandidate {
-        IceCandidate { candidate: text.to_owned(), sdp_mline_index: json!("0"), sdp_mid: json!("0") }
+        IceCandidate {
+            candidate: text.to_owned(),
+            sdp_mline_index: json!("0"),
+            sdp_mid: json!("0"),
+        }
     }
 
     #[test]
     fn remote_candidates_lose_the_a_prefix() {
-        let out = expand_remote_candidates(&[candidate("a=candidate:1 1 UDP 100 192.168.1.20 9002 typ host ")]);
+        let out = expand_remote_candidates(&[candidate(
+            "a=candidate:1 1 UDP 100 192.168.1.20 9002 typ host ",
+        )]);
         assert_eq!(
             out,
             vec![RemoteCandidate {
@@ -921,8 +1119,14 @@ mod tests {
             "a=candidate:2 1 UDP 50 2001:0000:4136:e378:8000:63bf:3fff:fdd2 3074 typ host ",
         )]);
         assert_eq!(out.len(), 3);
-        assert_eq!(out[0].candidate, "candidate:10 1 UDP 1 192.0.2.45 9002 typ host");
-        assert_eq!(out[1].candidate, "candidate:11 1 UDP 1 192.0.2.45 40000 typ host");
+        assert_eq!(
+            out[0].candidate,
+            "candidate:10 1 UDP 1 192.0.2.45 9002 typ host"
+        );
+        assert_eq!(
+            out[1].candidate,
+            "candidate:11 1 UDP 1 192.0.2.45 40000 typ host"
+        );
         assert!(out[2].candidate.starts_with("candidate:2 1 UDP 50 2001:"));
         assert!(out.iter().all(|c| c.sdp_mline_index == Some(0)));
     }
@@ -956,7 +1160,10 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_value(local_candidate_json(&init)).unwrap();
-        assert_eq!(json["candidate"], "candidate:1 1 udp 2130706431 192.168.1.5 50000 typ host");
+        assert_eq!(
+            json["candidate"],
+            "candidate:1 1 udp 2130706431 192.168.1.5 50000 typ host"
+        );
         assert_eq!(json["sdpMid"], "0");
         assert_eq!(json["sdpMLineIndex"], 0);
     }
@@ -972,7 +1179,10 @@ mod tests {
         assert_eq!(auth["accessKey"], "4BDB3609-C1F1-4195-9B37-FEFF45DA8B8E");
 
         let pad: Value = serde_json::from_str(&gamepad_changed_message(2, true)).unwrap();
-        assert_eq!(pad, json!({ "message": "gamepadChanged", "gamepadIndex": 2, "wasAdded": true }));
+        assert_eq!(
+            pad,
+            json!({ "message": "gamepadChanged", "gamepadIndex": 2, "wasAdded": true })
+        );
 
         let keyframe: Value = serde_json::from_str(&keyframe_request_message()).unwrap();
         assert_eq!(keyframe["message"], "videoKeyframeRequested");
@@ -984,7 +1194,10 @@ mod tests {
         assert_eq!(messages.len(), 6);
         let last: Value = serde_json::from_str(&messages[5]).unwrap();
         assert_eq!(last["type"], "Message");
-        assert_eq!(last["target"], "/streaming/characteristics/dimensionschanged");
+        assert_eq!(
+            last["target"],
+            "/streaming/characteristics/dimensionschanged"
+        );
         let content: Value = serde_json::from_str(last["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["preferredWidth"], 1920);
         assert!(uuid::Uuid::parse_str(last["id"].as_str().unwrap()).is_ok());
@@ -992,11 +1205,16 @@ mod tests {
 
     #[test]
     fn transactions_are_completed_with_the_same_id() {
-        let done: Value = serde_json::from_str(&transaction_complete_message(&json!("abc"), json!({ "Result": 0 }))).unwrap();
+        let done: Value = serde_json::from_str(&transaction_complete_message(
+            &json!("abc"),
+            json!({ "Result": 0 }),
+        ))
+        .unwrap();
         assert_eq!(done["type"], "TransactionComplete");
         assert_eq!(done["id"], "abc");
         assert_eq!(done["content"], "{\"Result\":0}");
-        let empty: Value = serde_json::from_str(&transaction_complete_message(&json!("x"), json!(""))).unwrap();
+        let empty: Value =
+            serde_json::from_str(&transaction_complete_message(&json!("x"), json!(""))).unwrap();
         assert_eq!(empty["content"], "\"\"");
     }
 }

@@ -115,7 +115,11 @@ fn thirty() -> u32 {
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { allow_requests: false, timed_play: false, turn_minutes: 30 }
+        Settings {
+            allow_requests: false,
+            timed_play: false,
+            turn_minutes: 30,
+        }
     }
 }
 
@@ -136,9 +140,14 @@ struct Stored {
 
 /// Sessions in a shape we no longer use (the single-password version kept only
 /// an expiry) are dropped instead of failing the whole file.
-fn lenient_sessions<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HashMap<String, Session>, D::Error> {
+fn lenient_sessions<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<HashMap<String, Session>, D::Error> {
     let raw: HashMap<String, Value> = HashMap::deserialize(d)?;
-    Ok(raw.into_iter().filter_map(|(k, v)| serde_json::from_value(v).ok().map(|s| (k, s))).collect())
+    Ok(raw
+        .into_iter()
+        .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|s| (k, s)))
+        .collect())
 }
 
 /// Changes the admin can make to a profile. Missing fields stay as they are.
@@ -155,7 +164,9 @@ pub struct ProfileChanges {
     pub max_quality: Option<Quality>,
 }
 
-fn some_option<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Vec<String>>>, D::Error> {
+fn some_option<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<Vec<String>>>, D::Error> {
     Ok(Some(Option::deserialize(d)?))
 }
 
@@ -186,7 +197,10 @@ pub struct Access {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Private, loopback and link-local addresses: the home network.
@@ -197,7 +211,9 @@ pub fn is_home_ip(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return v4.is_private() || v4.is_loopback() || v4.is_link_local();
             }
-            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
     }
 }
@@ -246,7 +262,11 @@ fn hash(password: &str) -> Result<String> {
 
 fn verify(password: &str, stored_hash: &str) -> bool {
     PasswordHash::new(stored_hash)
-        .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+        .map(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
@@ -261,7 +281,10 @@ fn new_id() -> String {
 }
 
 pub fn session_cookie(token: &str) -> String {
-    format!("{COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}", SESSION_DAYS * 86400)
+    format!(
+        "{COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        SESSION_DAYS * 86400
+    )
 }
 
 pub fn clear_cookie() -> String {
@@ -270,13 +293,24 @@ pub fn clear_cookie() -> String {
 
 impl Stored {
     fn name_taken(&self, name: &str, except: Option<&str>) -> bool {
-        self.profiles.iter().any(|p| p.name.eq_ignore_ascii_case(name) && Some(p.id.as_str()) != except)
-            || self.requests.iter().any(|r| r.name.eq_ignore_ascii_case(name))
+        self.profiles
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(name) && Some(p.id.as_str()) != except)
+            || self
+                .requests
+                .iter()
+                .any(|r| r.name.eq_ignore_ascii_case(name))
     }
 
     fn new_session(&mut self, profile: &str) -> String {
         let token = new_token();
-        self.sessions.insert(token.clone(), Session { profile: profile.to_owned(), expires: now_secs() + SESSION_DAYS * 86400 });
+        self.sessions.insert(
+            token.clone(),
+            Session {
+                profile: profile.to_owned(),
+                expires: now_secs() + SESSION_DAYS * 86400,
+            },
+        );
         token
     }
 
@@ -310,7 +344,11 @@ impl Access {
             }
             _ => false,
         };
-        let access = Access { path, stored: Mutex::new(stored), failures: Mutex::new(Vec::new()) };
+        let access = Access {
+            path,
+            stored: Mutex::new(stored),
+            failures: Mutex::new(Vec::new()),
+        };
         if migrated {
             access.save().await?;
         }
@@ -358,13 +396,23 @@ impl Access {
     }
 
     pub fn profile(&self, id: &str) -> Option<Profile> {
-        self.stored.lock().unwrap().profiles.iter().find(|p| p.id == id).cloned()
+        self.stored
+            .lock()
+            .unwrap()
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
     }
 
     pub fn verdict(&self, door: Door, peer: SocketAddr, headers: &HeaderMap) -> Verdict {
         let stored = self.stored.lock().unwrap();
         if stored.profiles.is_empty() {
-            return if at_home(door, peer) { Verdict::Ok(None) } else { Verdict::NotSetUp };
+            return if at_home(door, peer) {
+                Verdict::Ok(None)
+            } else {
+                Verdict::NotSetUp
+            };
         }
         let profile = session_from(headers)
             .and_then(|token| stored.sessions.get(&token).cloned())
@@ -377,7 +425,13 @@ impl Access {
     }
 
     /// Makes the first profile, the admin. Only from home, and only once.
-    pub async fn create_admin(&self, door: Door, peer: SocketAddr, name: &str, password: &str) -> Result<String> {
+    pub async fn create_admin(
+        &self,
+        door: Door,
+        peer: SocketAddr,
+        name: &str,
+        password: &str,
+    ) -> Result<String> {
         if !at_home(door, peer) {
             bail!("The admin profile can only be made from your home network.");
         }
@@ -390,7 +444,15 @@ impl Access {
                 bail!("The admin profile already exists.");
             }
             let id = new_id();
-            stored.profiles.push(Profile { id: id.clone(), name, password_hash, admin: true, xbox_home: true, games: None, max_quality: Quality::Max });
+            stored.profiles.push(Profile {
+                id: id.clone(),
+                name,
+                password_hash,
+                admin: true,
+                xbox_home: true,
+                games: None,
+                max_quality: Quality::Max,
+            });
             stored.new_session(&id)
         };
         self.save().await?;
@@ -408,7 +470,11 @@ impl Access {
         }
         let found = {
             let stored = self.stored.lock().unwrap();
-            stored.profiles.iter().find(|p| p.name.eq_ignore_ascii_case(name.trim())).map(|p| (p.id.clone(), p.password_hash.clone()))
+            stored
+                .profiles
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name.trim()))
+                .map(|p| (p.id.clone(), p.password_hash.clone()))
         };
         let ok = found.as_ref().is_some_and(|(_, h)| verify(password, h));
         let Some((id, _)) = found.filter(|_| ok) else {
@@ -444,7 +510,12 @@ impl Access {
             if stored.requests.len() >= MAX_REQUESTS {
                 bail!("Too many requests are waiting. Try again later.");
             }
-            stored.requests.push(AccessRequest { id: new_id(), name, password_hash, created: now_secs() });
+            stored.requests.push(AccessRequest {
+                id: new_id(),
+                name,
+                password_hash,
+                created: now_secs(),
+            });
         }
         self.save().await
     }
@@ -474,7 +545,15 @@ impl Access {
             if stored.name_taken(&name, None) {
                 bail!("That name is taken.");
             }
-            stored.profiles.push(Profile { id: new_id(), name, password_hash, admin, xbox_home: true, games: None, max_quality: Quality::Max });
+            stored.profiles.push(Profile {
+                id: new_id(),
+                name,
+                password_hash,
+                admin,
+                xbox_home: true,
+                games: None,
+                max_quality: Quality::Max,
+            });
         }
         self.save().await
     }
@@ -495,11 +574,16 @@ impl Access {
                     bail!("That name is taken.");
                 }
             }
-            let losing_admin = changes.admin == Some(false) && stored.profiles.iter().any(|p| p.id == id && p.admin);
+            let losing_admin = changes.admin == Some(false)
+                && stored.profiles.iter().any(|p| p.id == id && p.admin);
             if losing_admin && stored.admins() <= 1 {
                 bail!("There has to be at least one admin.");
             }
-            let profile = stored.profiles.iter_mut().find(|p| p.id == id).ok_or_else(|| anyhow!("No such profile."))?;
+            let profile = stored
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == id)
+                .ok_or_else(|| anyhow!("No such profile."))?;
             if let Some(name) = new_name {
                 profile.name = name;
             }
@@ -525,7 +609,9 @@ impl Access {
     pub async fn delete_profile(&self, id: &str) -> Result<()> {
         {
             let mut stored = self.stored.lock().unwrap();
-            let Some(index) = stored.profiles.iter().position(|p| p.id == id) else { bail!("No such profile.") };
+            let Some(index) = stored.profiles.iter().position(|p| p.id == id) else {
+                bail!("No such profile.")
+            };
             if stored.profiles[index].admin && stored.admins() <= 1 {
                 bail!("There has to be at least one admin.");
             }
@@ -538,7 +624,9 @@ impl Access {
     pub async fn answer_request(&self, id: &str, approve: bool) -> Result<()> {
         {
             let mut stored = self.stored.lock().unwrap();
-            let Some(index) = stored.requests.iter().position(|r| r.id == id) else { bail!("That request is gone.") };
+            let Some(index) = stored.requests.iter().position(|r| r.id == id) else {
+                bail!("That request is gone.")
+            };
             let request = stored.requests.remove(index);
             if approve {
                 stored.profiles.push(Profile {
@@ -575,7 +663,10 @@ mod tests {
 
     fn with_cookie(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(header::COOKIE, HeaderValue::from_str(&format!("other=1; {COOKIE}={token}")).unwrap());
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("other=1; {COOKIE}={token}")).unwrap(),
+        );
         headers
     }
 
@@ -594,7 +685,14 @@ mod tests {
 
     #[test]
     fn home_addresses() {
-        for ip in ["192.168.1.20", "10.0.0.5", "172.16.3.4", "127.0.0.1", "fd00::1", "::ffff:192.168.1.2"] {
+        for ip in [
+            "192.168.1.20",
+            "10.0.0.5",
+            "172.16.3.4",
+            "127.0.0.1",
+            "fd00::1",
+            "::ffff:192.168.1.2",
+        ] {
             assert!(is_home_ip(ip.parse().unwrap()), "{ip}");
         }
         for ip in ["8.8.8.8", "2a00:1450::1", "::ffff:8.8.8.8"] {
@@ -606,25 +704,65 @@ mod tests {
     async fn before_the_admin_only_home_gets_in() {
         let (access, dir) = fresh().await;
         let none = HeaderMap::new();
-        assert_eq!(access.verdict(Door::Home, peer("192.168.1.20"), &none), Verdict::Ok(None));
-        assert_eq!(access.verdict(Door::Home, peer("8.8.8.8"), &none), Verdict::NotSetUp);
-        assert_eq!(access.verdict(Door::Remote, peer("127.0.0.1"), &none), Verdict::NotSetUp);
-        assert!(access.create_admin(Door::Remote, peer("127.0.0.1"), "Patrick", "longenough").await.is_err());
-        assert!(access.create_admin(Door::Home, peer("8.8.8.8"), "Patrick", "longenough").await.is_err());
+        assert_eq!(
+            access.verdict(Door::Home, peer("192.168.1.20"), &none),
+            Verdict::Ok(None)
+        );
+        assert_eq!(
+            access.verdict(Door::Home, peer("8.8.8.8"), &none),
+            Verdict::NotSetUp
+        );
+        assert_eq!(
+            access.verdict(Door::Remote, peer("127.0.0.1"), &none),
+            Verdict::NotSetUp
+        );
+        assert!(access
+            .create_admin(Door::Remote, peer("127.0.0.1"), "Patrick", "longenough")
+            .await
+            .is_err());
+        assert!(access
+            .create_admin(Door::Home, peer("8.8.8.8"), "Patrick", "longenough")
+            .await
+            .is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn profiles_log_in_by_name() {
         let (access, dir) = fresh().await;
-        assert!(access.create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "short").await.is_err());
-        let admin = access.create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough").await.unwrap();
-        assert!(access.create_admin(Door::Home, peer("192.168.1.20"), "Other", "longenough").await.is_err());
-        assert_eq!(logged_in_as(access.verdict(Door::Remote, peer("127.0.0.1"), &with_cookie(&admin))).as_deref(), Some("Patrick"));
-        assert_eq!(access.verdict(Door::Home, peer("192.168.1.20"), &HeaderMap::new()), Verdict::LoginNeeded);
+        assert!(access
+            .create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "short")
+            .await
+            .is_err());
+        let admin = access
+            .create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough")
+            .await
+            .unwrap();
+        assert!(access
+            .create_admin(Door::Home, peer("192.168.1.20"), "Other", "longenough")
+            .await
+            .is_err());
+        assert_eq!(
+            logged_in_as(access.verdict(Door::Remote, peer("127.0.0.1"), &with_cookie(&admin)))
+                .as_deref(),
+            Some("Patrick")
+        );
+        assert_eq!(
+            access.verdict(Door::Home, peer("192.168.1.20"), &HeaderMap::new()),
+            Verdict::LoginNeeded
+        );
 
-        access.create_profile("Guest", "guestpass1", false).await.unwrap();
-        assert!(access.create_profile("guest", "guestpass1", false).await.is_err(), "names are unique");
+        access
+            .create_profile("Guest", "guestpass1", false)
+            .await
+            .unwrap();
+        assert!(
+            access
+                .create_profile("guest", "guestpass1", false)
+                .await
+                .is_err(),
+            "names are unique"
+        );
         assert!(access.login("Guest", "wrong-pass").await.is_err());
         let guest = access.login("guest", "guestpass1").await.unwrap();
         let verdict = access.verdict(Door::Remote, peer("127.0.0.1"), &with_cookie(&guest));
@@ -632,28 +770,65 @@ mod tests {
 
         // Survives a restart.
         let again = Access::load(&dir).await.unwrap();
-        assert_eq!(logged_in_as(again.verdict(Door::Remote, peer("127.0.0.1"), &with_cookie(&guest))).as_deref(), Some("Guest"));
+        assert_eq!(
+            logged_in_as(again.verdict(Door::Remote, peer("127.0.0.1"), &with_cookie(&guest)))
+                .as_deref(),
+            Some("Guest")
+        );
 
         // Deleting a profile ends its sessions; the last admin stays.
-        let guest_id = access.admin_view()["profiles"][1]["id"].as_str().unwrap().to_owned();
+        let guest_id = access.admin_view()["profiles"][1]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         access.delete_profile(&guest_id).await.unwrap();
-        assert_eq!(access.verdict(Door::Remote, peer("127.0.0.1"), &with_cookie(&guest)), Verdict::LoginNeeded);
-        let admin_id = access.admin_view()["profiles"][0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            access.verdict(Door::Remote, peer("127.0.0.1"), &with_cookie(&guest)),
+            Verdict::LoginNeeded
+        );
+        let admin_id = access.admin_view()["profiles"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert!(access.delete_profile(&admin_id).await.is_err());
-        assert!(access.update_profile(&admin_id, ProfileChanges { admin: Some(false), ..Default::default() }).await.is_err());
+        assert!(access
+            .update_profile(
+                &admin_id,
+                ProfileChanges {
+                    admin: Some(false),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn access_requests_wait_for_the_admin() {
         let (access, dir) = fresh().await;
-        access.create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough").await.unwrap();
-        assert!(access.request_access("Friend", "friendpass").await.is_err(), "off by default");
+        access
+            .create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough")
+            .await
+            .unwrap();
+        assert!(
+            access.request_access("Friend", "friendpass").await.is_err(),
+            "off by default"
+        );
         access.set_allow_requests(true).await.unwrap();
         access.request_access("Friend", "friendpass").await.unwrap();
-        assert!(access.request_access("friend", "friendpass").await.is_err(), "name already asked for");
-        assert!(access.login("Friend", "friendpass").await.is_err(), "not approved yet");
-        let id = access.admin_view()["requests"][0]["id"].as_str().unwrap().to_owned();
+        assert!(
+            access.request_access("friend", "friendpass").await.is_err(),
+            "name already asked for"
+        );
+        assert!(
+            access.login("Friend", "friendpass").await.is_err(),
+            "not approved yet"
+        );
+        let id = access.admin_view()["requests"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         access.answer_request(&id, true).await.unwrap();
         assert!(access.login("Friend", "friendpass").await.is_ok());
         assert_eq!(access.admin_view()["requests"].as_array().unwrap().len(), 0);
@@ -663,19 +838,40 @@ mod tests {
     #[tokio::test]
     async fn profile_changes_apply() {
         let (access, dir) = fresh().await;
-        access.create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough").await.unwrap();
-        access.create_profile("Kid", "kidpass12", false).await.unwrap();
-        let id = access.admin_view()["profiles"][1]["id"].as_str().unwrap().to_owned();
-        let changes: ProfileChanges = serde_json::from_str(r#"{"xboxHome":false,"games":["9NBLGGH4R315"],"maxQuality":"medium"}"#).unwrap();
+        access
+            .create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough")
+            .await
+            .unwrap();
+        access
+            .create_profile("Kid", "kidpass12", false)
+            .await
+            .unwrap();
+        let id = access.admin_view()["profiles"][1]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let changes: ProfileChanges = serde_json::from_str(
+            r#"{"xboxHome":false,"games":["9NBLGGH4R315"],"maxQuality":"medium"}"#,
+        )
+        .unwrap();
         access.update_profile(&id, changes).await.unwrap();
         let p = access.profile(&id).unwrap();
         assert!(!p.xbox_home);
         assert_eq!(p.games.as_deref(), Some(&["9NBLGGH4R315".to_owned()][..]));
         assert_eq!(p.max_quality, Quality::Medium);
         // "games": null means all games again; leaving it out changes nothing.
-        access.update_profile(&id, serde_json::from_str(r#"{"maxQuality":"low"}"#).unwrap()).await.unwrap();
+        access
+            .update_profile(
+                &id,
+                serde_json::from_str(r#"{"maxQuality":"low"}"#).unwrap(),
+            )
+            .await
+            .unwrap();
         assert!(access.profile(&id).unwrap().games.is_some());
-        access.update_profile(&id, serde_json::from_str(r#"{"games":null}"#).unwrap()).await.unwrap();
+        access
+            .update_profile(&id, serde_json::from_str(r#"{"games":null}"#).unwrap())
+            .await
+            .unwrap();
         assert!(access.profile(&id).unwrap().games.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -688,18 +884,27 @@ mod tests {
         std::fs::write(dir.join("access.json"), old.to_string()).unwrap();
         let access = Access::load(&dir).await.unwrap();
         assert!(access.login("Admin", "oldpassword").await.is_ok());
-        assert!(access.admin_view()["profiles"][0]["admin"].as_bool().unwrap());
+        assert!(access.admin_view()["profiles"][0]["admin"]
+            .as_bool()
+            .unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn too_many_wrong_passwords_wait() {
         let (access, dir) = fresh().await;
-        access.create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough").await.unwrap();
+        access
+            .create_admin(Door::Home, peer("192.168.1.20"), "Patrick", "longenough")
+            .await
+            .unwrap();
         for _ in 0..5 {
             let _ = access.login("Patrick", "bad").await;
         }
-        let error = access.login("Patrick", "longenough").await.unwrap_err().to_string();
+        let error = access
+            .login("Patrick", "longenough")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Too many"));
         let _ = std::fs::remove_dir_all(dir);
     }

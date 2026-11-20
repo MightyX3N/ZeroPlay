@@ -143,7 +143,9 @@ fn parse_state(body: &Value) -> SessionState {
         "ReadyToConnect" => SessionState::ReadyToConnect,
         "Provisioned" => SessionState::Provisioned,
         "Failed" => SessionState::Failed(
-            body.get("errorDetails").map(|d| d.to_string()).unwrap_or_else(|| "no details".to_owned()),
+            body.get("errorDetails")
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "no details".to_owned()),
         ),
         other => SessionState::Other(other.to_owned()),
     }
@@ -151,8 +153,14 @@ fn parse_state(body: &Value) -> SessionState {
 
 impl HomeApi {
     pub fn new(token: &StreamingToken) -> Result<Self> {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
-        Ok(Self { http, base_uri: token.base_uri.clone(), gs_token: token.gs_token.clone() })
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        Ok(Self {
+            http,
+            base_uri: token.base_uri.clone(),
+            gs_token: token.gs_token.clone(),
+        })
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -167,14 +175,21 @@ impl HomeApi {
             return Ok(response);
         }
         let status = response.status();
-        let body: String = response.text().await.unwrap_or_default().chars().take(600).collect();
+        let body: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(600)
+            .collect();
         Err(anyhow!("{what} failed with HTTP {status}: {body}"))
     }
 
     /// GET that retries while the server answers "204, not ready yet".
     async fn get_when_ready(&self, path: &str, what: &str) -> Result<Value> {
         for _ in 0..80 {
-            let response = Self::check(self.request(reqwest::Method::GET, path).send().await?, what).await?;
+            let response =
+                Self::check(self.request(reqwest::Method::GET, path).send().await?, what).await?;
             if response.status() == reqwest::StatusCode::NO_CONTENT {
                 tokio::time::sleep(Duration::from_millis(750)).await;
                 continue;
@@ -192,19 +207,30 @@ impl HomeApi {
             .json(&play_body(console_id))
             .send()
             .await?;
-        let play: PlayResponse = Self::check(response, "starting the stream").await?.json().await?;
+        let play: PlayResponse = Self::check(response, "starting the stream")
+            .await?
+            .json()
+            .await?;
         session_id_from_path(&play.session_path)
     }
 
     pub async fn state(&self, session_id: &str) -> Result<SessionState> {
-        let body = self.get_when_ready(&format!("/v5/sessions/home/{session_id}/state"), "reading the session state").await?;
+        let body = self
+            .get_when_ready(
+                &format!("/v5/sessions/home/{session_id}/state"),
+                "reading the session state",
+            )
+            .await?;
         Ok(parse_state(&body))
     }
 
     /// Hands the console the transfer token it asks for in `ReadyToConnect`.
     pub async fn connect(&self, session_id: &str, transfer_token: &str) -> Result<()> {
         let response = self
-            .request(reqwest::Method::POST, &format!("/v5/sessions/home/{session_id}/connect"))
+            .request(
+                reqwest::Method::POST,
+                &format!("/v5/sessions/home/{session_id}/connect"),
+            )
             .json(&json!({ "userToken": transfer_token }))
             .send()
             .await?;
@@ -213,15 +239,23 @@ impl HomeApi {
     }
 
     async fn exchange(&self, path: &str, body: &Value, what: &str) -> Result<String> {
-        let response = self.request(reqwest::Method::POST, path).json(body).send().await?;
+        let response = self
+            .request(reqwest::Method::POST, path)
+            .json(body)
+            .send()
+            .await?;
         Self::check(response, what).await?;
-        let answer: ExchangeResponse = serde_json::from_value(self.get_when_ready(path, what).await?)
-            .with_context(|| format!("{what}: unexpected answer"))?;
+        let answer: ExchangeResponse =
+            serde_json::from_value(self.get_when_ready(path, what).await?)
+                .with_context(|| format!("{what}: unexpected answer"))?;
         match answer.exchange_response {
             Some(text) => Ok(text),
             None => bail!(
                 "{what}: the console sent no answer ({})",
-                answer.error_details.map(|d| d.to_string()).unwrap_or_else(|| "no details".to_owned())
+                answer
+                    .error_details
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "no details".to_owned())
             ),
         }
     }
@@ -229,23 +263,41 @@ impl HomeApi {
     /// Sends our SDP offer and returns the console's SDP answer.
     pub async fn exchange_sdp(&self, session_id: &str, offer_sdp: &str) -> Result<String> {
         let text = self
-            .exchange(&format!("/v5/sessions/home/{session_id}/sdp"), &sdp_body(offer_sdp), "exchanging SDP")
+            .exchange(
+                &format!("/v5/sessions/home/{session_id}/sdp"),
+                &sdp_body(offer_sdp),
+                "exchanging SDP",
+            )
             .await?;
-        let answer: SdpAnswer = serde_json::from_str(&text).context("the console's SDP answer was not valid JSON")?;
+        let answer: SdpAnswer =
+            serde_json::from_str(&text).context("the console's SDP answer was not valid JSON")?;
         Ok(answer.sdp)
     }
 
     /// Sends our ICE candidates and returns the console's.
-    pub async fn exchange_ice(&self, session_id: &str, candidates: &[IceCandidate]) -> Result<Vec<IceCandidate>> {
+    pub async fn exchange_ice(
+        &self,
+        session_id: &str,
+        candidates: &[IceCandidate],
+    ) -> Result<Vec<IceCandidate>> {
         let body = json!({ "messageType": "iceCandidate", "candidate": candidates });
-        let text = self.exchange(&format!("/v5/sessions/home/{session_id}/ice"), &body, "exchanging ICE candidates").await?;
+        let text = self
+            .exchange(
+                &format!("/v5/sessions/home/{session_id}/ice"),
+                &body,
+                "exchanging ICE candidates",
+            )
+            .await?;
         serde_json::from_str(&text).context("the console's ICE candidates were not valid JSON")
     }
 
     /// Must be sent about every 30 seconds while streaming.
     pub async fn keepalive(&self, session_id: &str) -> Result<()> {
         let response = self
-            .request(reqwest::Method::POST, &format!("/v5/sessions/home/{session_id}/keepalive"))
+            .request(
+                reqwest::Method::POST,
+                &format!("/v5/sessions/home/{session_id}/keepalive"),
+            )
             .json(&json!({}))
             .send()
             .await?;
@@ -255,7 +307,13 @@ impl HomeApi {
 
     /// Ends the session so the console is free again.
     pub async fn stop(&self, session_id: &str) -> Result<()> {
-        let response = self.request(reqwest::Method::DELETE, &format!("/v5/sessions/home/{session_id}")).send().await?;
+        let response = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/v5/sessions/home/{session_id}"),
+            )
+            .send()
+            .await?;
         Self::check(response, "stopping the stream").await?;
         Ok(())
     }
@@ -267,22 +325,40 @@ mod tests {
 
     #[test]
     fn session_id_comes_from_the_path() {
-        assert_eq!(session_id_from_path("v5/sessions/home/ABC-123").unwrap(), "ABC-123");
-        assert_eq!(session_id_from_path("/v5/sessions/home/ABC-123").unwrap(), "ABC-123");
+        assert_eq!(
+            session_id_from_path("v5/sessions/home/ABC-123").unwrap(),
+            "ABC-123"
+        );
+        assert_eq!(
+            session_id_from_path("/v5/sessions/home/ABC-123").unwrap(),
+            "ABC-123"
+        );
         assert!(session_id_from_path("v5/sessions/home").is_err());
         assert!(session_id_from_path("").is_err());
     }
 
     #[test]
     fn states_are_recognised() {
-        assert_eq!(parse_state(&json!({"state": "Provisioning"})), SessionState::Provisioning);
-        assert_eq!(parse_state(&json!({"state": "ReadyToConnect"})), SessionState::ReadyToConnect);
-        assert_eq!(parse_state(&json!({"state": "Provisioned"})), SessionState::Provisioned);
+        assert_eq!(
+            parse_state(&json!({"state": "Provisioning"})),
+            SessionState::Provisioning
+        );
+        assert_eq!(
+            parse_state(&json!({"state": "ReadyToConnect"})),
+            SessionState::ReadyToConnect
+        );
+        assert_eq!(
+            parse_state(&json!({"state": "Provisioned"})),
+            SessionState::Provisioned
+        );
         assert!(matches!(
             parse_state(&json!({"state": "Failed", "errorDetails": {"code": "X", "message": "nope"}})),
             SessionState::Failed(details) if details.contains("nope")
         ));
-        assert_eq!(parse_state(&json!({"state": "Surprise"})), SessionState::Other("Surprise".to_owned()));
+        assert_eq!(
+            parse_state(&json!({"state": "Surprise"})),
+            SessionState::Other("Surprise".to_owned())
+        );
         assert_eq!(parse_state(&json!({})), SessionState::Other(String::new()));
     }
 

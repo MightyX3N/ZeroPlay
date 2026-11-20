@@ -35,7 +35,12 @@ struct ListResponse {
     result: Vec<Console>,
 }
 
-fn request(http: &reqwest::Client, method: reqwest::Method, path: &str, token: &XboxToken) -> reqwest::RequestBuilder {
+fn request(
+    http: &reqwest::Client,
+    method: reqwest::Method,
+    path: &str,
+    token: &XboxToken,
+) -> reqwest::RequestBuilder {
     http.request(method, format!("{HOST}{path}"))
         .header("Authorization", token.authorization_header())
         .header("Accept-Language", "en-US")
@@ -49,7 +54,13 @@ async fn check(response: reqwest::Response, what: &str) -> Result<reqwest::Respo
         return Ok(response);
     }
     let status = response.status();
-    let body: String = response.text().await.unwrap_or_default().chars().take(600).collect();
+    let body: String = response
+        .text()
+        .await
+        .unwrap_or_default()
+        .chars()
+        .take(600)
+        .collect();
     Err(anyhow!("{what} failed with HTTP {status}: {body}"))
 }
 
@@ -78,14 +89,22 @@ pub async fn wake(http: &reqwest::Client, token: &XboxToken, console_id: &str) -
         "parameters": [],
         "linkedXboxId": console_id,
     });
-    let response = request(http, reqwest::Method::POST, "/commands", token).json(&body).send().await?;
+    let response = request(http, reqwest::Method::POST, "/commands", token)
+        .json(&body)
+        .send()
+        .await?;
     check(response, "waking the console").await?;
     Ok(())
 }
 
 /// Presses a button on a console through Xbox Live, without a stream.
 /// `key` is one of Guide, Menu, View, A, B, X, Y, Up, Down, Left, Right, Nexus.
-pub async fn press_button(http: &reqwest::Client, token: &XboxToken, console_id: &str, key: &str) -> Result<()> {
+pub async fn press_button(
+    http: &reqwest::Client,
+    token: &XboxToken,
+    console_id: &str,
+    key: &str,
+) -> Result<()> {
     let body = json!({
         "destination": "Xbox",
         "type": "Shell",
@@ -95,7 +114,10 @@ pub async fn press_button(http: &reqwest::Client, token: &XboxToken, console_id:
         "parameters": [{ "keyType": key }],
         "linkedXboxId": console_id,
     });
-    let response = request(http, reqwest::Method::POST, "/commands", token).json(&body).send().await?;
+    let response = request(http, reqwest::Method::POST, "/commands", token)
+        .json(&body)
+        .send()
+        .await?;
     check(response, "pressing a button on the console").await?;
     Ok(())
 }
@@ -126,7 +148,8 @@ mod tests {
 
     #[test]
     fn an_empty_account_gives_an_empty_list() {
-        let parsed: ListResponse = serde_json::from_str(r#"{"status":{"errorCode":"OK"}}"#).unwrap();
+        let parsed: ListResponse =
+            serde_json::from_str(r#"{"status":{"errorCode":"OK"}}"#).unwrap();
         assert!(parsed.result.is_empty());
     }
 }
