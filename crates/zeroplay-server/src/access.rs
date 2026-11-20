@@ -97,11 +97,26 @@ struct Session {
     expires: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     /// The login page offers "Request access".
     #[serde(default)]
     pub allow_requests: bool,
+    /// Players who opt in take turns.
+    #[serde(default)]
+    pub timed_play: bool,
+    #[serde(default = "thirty")]
+    pub turn_minutes: u32,
+}
+
+fn thirty() -> u32 {
+    30
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings { allow_requests: false, timed_play: false, turn_minutes: 30 }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -322,6 +337,22 @@ impl Access {
         !self.stored.lock().unwrap().profiles.is_empty()
     }
 
+    pub fn settings(&self) -> Settings {
+        self.stored.lock().unwrap().settings.clone()
+    }
+
+    pub async fn set_timed_play(&self, enabled: bool, minutes: u32) -> Result<()> {
+        if !(1..=240).contains(&minutes) {
+            bail!("Pick a turn length between 1 and 240 minutes.");
+        }
+        {
+            let mut stored = self.stored.lock().unwrap();
+            stored.settings.timed_play = enabled;
+            stored.settings.turn_minutes = minutes;
+        }
+        self.save().await
+    }
+
     pub fn requests_open(&self) -> bool {
         self.stored.lock().unwrap().settings.allow_requests
     }
@@ -426,7 +457,11 @@ impl Access {
         json!({
             "profiles": stored.profiles.iter().map(Profile::public).collect::<Vec<_>>(),
             "requests": stored.requests.iter().map(|r| json!({ "id": r.id, "name": r.name, "created": r.created })).collect::<Vec<_>>(),
-            "settings": { "allowRequests": stored.settings.allow_requests },
+            "settings": {
+                "allowRequests": stored.settings.allow_requests,
+                "timedPlay": stored.settings.timed_play,
+                "turnMinutes": stored.settings.turn_minutes,
+            },
         })
     }
 

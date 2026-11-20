@@ -7,6 +7,7 @@
 mod access;
 mod app;
 mod config;
+mod control;
 mod playit;
 mod sdp;
 mod viewer;
@@ -203,6 +204,11 @@ enum FromPage {
     AdminDelete { id: String },
     AdminAnswer { id: String, approve: bool },
     AdminAllowRequests { allow: bool },
+    AdminTimedPlay { enabled: bool, minutes: u32 },
+    AdminAnswerTime { id: u64, approve: bool },
+    // Timed play.
+    Turns { on: bool },
+    RequestTime,
 }
 
 async fn client(app: Arc<App>, socket: WebSocket, home: bool, profile: Option<access::Profile>) {
@@ -294,6 +300,7 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
             match viewer::connect(app, sdp).await {
                 Ok((new_peer, answer)) => {
                     *peer = Some(new_peer);
+                    app.start_watching(id);
                     return Some(Direct::Answer { sdp: answer });
                 }
                 Err(e) => return error(format!("Could not start the video: {e:#}")),
@@ -303,6 +310,7 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
             if let Some(old) = peer.take() {
                 old.close().await;
             }
+            app.stop_watching(id).await;
         }
         FromPage::Pad { local, buttons, lx, ly, rx, ry, lt, rt } => {
             let clamp = |v: f64, lo: f64| if v.is_finite() { v.clamp(lo, 1.0) } else { 0.0 };
@@ -332,6 +340,8 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
         | FromPage::AdminDelete { .. }
         | FromPage::AdminAnswer { .. }
         | FromPage::AdminAllowRequests { .. }
+        | FromPage::AdminTimedPlay { .. }
+        | FromPage::AdminAnswerTime { .. }
             if !is_admin(app, id) =>
         {
             return error("Only an admin can change profiles.");
@@ -341,6 +351,10 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
         FromPage::AdminDelete { id: profile } => return admin_done(app, app.access.delete_profile(&profile).await),
         FromPage::AdminAnswer { id: request, approve } => return admin_done(app, app.access.answer_request(&request, approve).await),
         FromPage::AdminAllowRequests { allow } => return admin_done(app, app.access.set_allow_requests(allow).await),
+        FromPage::AdminTimedPlay { enabled, minutes } => return admin_done(app, app.access.set_timed_play(enabled, minutes).await),
+        FromPage::AdminAnswerTime { id: request, approve } => app.answer_time(request, approve).await,
+        FromPage::Turns { on } => app.set_turns(id, on),
+        FromPage::RequestTime => return app.request_time(id),
         FromPage::PlayitConnect => app.playit.connect(),
         FromPage::PlayitDisconnect => app.playit.disconnect().await,
     }

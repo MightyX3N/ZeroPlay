@@ -83,6 +83,23 @@ pub async fn wake(http: &reqwest::Client, token: &XboxToken, console_id: &str) -
     Ok(())
 }
 
+/// Presses a button on a console through Xbox Live, without a stream.
+/// `key` is one of Guide, Menu, View, A, B, X, Y, Up, Down, Left, Right, Nexus.
+pub async fn press_button(http: &reqwest::Client, token: &XboxToken, console_id: &str, key: &str) -> Result<()> {
+    let body = json!({
+        "destination": "Xbox",
+        "type": "Shell",
+        "command": "InjectKey",
+        "sessionId": uuid::Uuid::new_v4().to_string(),
+        "sourceId": "com.microsoft.smartglass",
+        "parameters": [{ "keyType": key }],
+        "linkedXboxId": console_id,
+    });
+    let response = request(http, reqwest::Method::POST, "/commands", token).json(&body).send().await?;
+    check(response, "pressing a button on the console").await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

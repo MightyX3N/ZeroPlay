@@ -19,10 +19,9 @@ use zeroplay_xbox::session::{start_home_session, MediaPacket, Session, SessionEv
 
 use crate::access::{Access, Profile};
 use crate::config::Config;
+use crate::control::{Effect, Rules, Seats};
 use crate::playit::Playit;
 
-/// Console slots on Xbox.
-pub const SLOTS: usize = 4;
 
 /// A message sent to one player's connection only.
 #[derive(Clone, Debug, Serialize)]
@@ -33,6 +32,8 @@ pub enum Direct {
     Error { message: String },
     /// This player's profile was deleted or changed; the page checks its login again.
     LoggedOut,
+    /// Something to show this player; `countdown` shows a big countdown.
+    Notice { text: String, countdown: Option<u32> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +41,8 @@ enum StreamState {
     Idle,
     Starting { console_id: String, console_name: String, step: String },
     Live { console_id: String, console_name: String, title: Option<String> },
+    /// The connection to the console dropped; trying to get it back.
+    Reconnecting { console_id: String, console_name: String, attempt: u32 },
     Failed { message: String },
 }
 
@@ -52,8 +55,6 @@ struct Viewer {
     direct: mpsc::UnboundedSender<Direct>,
 }
 
-/// Which player and which of their controllers holds a console slot.
-type SlotOwner = (u64, u8);
 
 struct Inner {
     signed_in: bool,
@@ -63,8 +64,7 @@ struct Inner {
     console_error: Option<String>,
     stream: StreamState,
     viewers: HashMap<u64, Viewer>,
-    slots: [Option<SlotOwner>; SLOTS],
-    pads: [Option<GamepadState>; SLOTS],
+    seats: Seats,
     free_ports: Vec<u16>,
     last_keyframe: Option<Instant>,
 }
@@ -109,8 +109,7 @@ impl App {
                 console_error: None,
                 stream: StreamState::Idle,
                 viewers: HashMap::new(),
-                slots: [None; SLOTS],
-                pads: [None; SLOTS],
+                seats: Seats::default(),
                 free_ports,
                 last_keyframe: None,
             }),
@@ -123,6 +122,14 @@ impl App {
             access,
         });
         app.playit.start_if_linked().await;
+        let ticker = app.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                every.tick().await;
+                ticker.tick().await;
+            }
+        });
         if signed_in {
             let app2 = app.clone();
             tokio::spawn(async move { app2.refresh_consoles().await });
@@ -149,25 +156,103 @@ impl App {
         (id, rx)
     }
 
+    /// A player's connection is gone. With a stream running their controllers
+    /// are unplugged (games pause) and their slot is held for a minute.
     pub async fn remove_viewer(&self, id: u64) {
-        let freed: Vec<u8> = {
+        let effects = {
             let mut inner = self.inner.lock().unwrap();
-            inner.viewers.remove(&id);
-            let mut freed = Vec::new();
-            for slot in 0..SLOTS {
-                if matches!(inner.slots[slot], Some((owner, _)) if owner == id) {
-                    inner.slots[slot] = None;
-                    inner.pads[slot] = None;
-                    freed.push(slot as u8);
+            let profile = inner.viewers.remove(&id).and_then(|v| v.profile).map(|p| p.id);
+            let live = matches!(inner.stream, StreamState::Live { .. } | StreamState::Reconnecting { .. });
+            inner.seats.disconnect(id, profile.as_deref(), live, Instant::now(), &self.rules())
+        };
+        self.apply(effects).await;
+        self.changed();
+    }
+
+    /// The player started watching the stream.
+    pub fn start_watching(&self, id: u64) {
+        self.inner.lock().unwrap().seats.start_watching(id, Instant::now());
+        self.changed();
+    }
+
+    /// The player went back to home: their controller goes to the next in line.
+    pub async fn stop_watching(&self, id: u64) {
+        let effects = self.inner.lock().unwrap().seats.stop_watching(id, Instant::now());
+        self.apply(effects).await;
+        self.changed();
+    }
+
+    fn rules(&self) -> Rules {
+        let settings = self.access.settings();
+        Rules {
+            turn: settings.timed_play.then(|| Duration::from_secs(settings.turn_minutes.max(1) as u64 * 60)),
+            ..Rules::default()
+        }
+    }
+
+    /// Carries out what the seat rules decided.
+    async fn apply(&self, effects: Vec<Effect>) {
+        if effects.is_empty() {
+            return;
+        }
+        let session = self.current_session();
+        for effect in effects {
+            match effect {
+                Effect::Plug(state) => {
+                    if let Some(session) = &session {
+                        let _ = session.set_gamepad(state).await;
+                    }
+                }
+                Effect::Unplug(slot) => {
+                    if let Some(session) = &session {
+                        let _ = session.remove_gamepad(slot).await;
+                    }
+                }
+                Effect::Notice { viewer, text, countdown } => self.send_direct(viewer, Direct::Notice { text, countdown }),
+                Effect::Stop(why) => {
+                    println!("[stream] stopping: {why}");
+                    self.stop().await;
                 }
             }
-            freed
-        };
-        if let Some(session) = self.current_session() {
-            for slot in freed {
-                let _ = session.remove_gamepad(slot).await;
-            }
         }
+        self.changed();
+    }
+
+    /// Every second: AFK, held slots, timed play, nobody left.
+    async fn tick(&self) {
+        let rules = self.rules();
+        let effects = {
+            let mut inner = self.inner.lock().unwrap();
+            let live = matches!(inner.stream, StreamState::Live { .. } | StreamState::Reconnecting { .. });
+            let connected = inner.viewers.len();
+            inner.seats.tick(Instant::now(), &rules, live, connected)
+        };
+        self.apply(effects).await;
+    }
+
+    pub fn set_turns(&self, id: u64, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if on {
+            inner.seats.opted_in.insert(id);
+        } else {
+            inner.seats.opted_in.remove(&id);
+        }
+        drop(inner);
+        self.changed();
+    }
+
+    pub fn request_time(&self, id: u64) -> Option<Direct> {
+        let asked = self.inner.lock().unwrap().seats.request_time(id, 15);
+        self.changed();
+        match asked {
+            Some(_) => Some(Direct::Notice { text: "Asked the admin for 15 more minutes. Your clock is stopped until they answer.".to_owned(), countdown: None }),
+            None => Some(Direct::Error { message: "More time can only be asked for during your turn, once at a time.".to_owned() }),
+        }
+    }
+
+    pub async fn answer_time(&self, request: u64, approve: bool) {
+        let effects = self.inner.lock().unwrap().seats.answer_time(request, approve);
+        self.apply(effects).await;
         self.changed();
     }
 
@@ -231,32 +316,28 @@ impl App {
 
     /// One of a player's controllers changed. The first time a controller
     /// sends anything it is given a free console slot.
+    /// One of a player's controllers changed. The first time a controller
+    /// sends anything it gets a console slot (one held for the player's
+    /// profile, or a free one).
     pub async fn set_pad(&self, id: u64, local: u8, mut state: GamepadState) {
-        let (slot, is_new) = {
+        let (state, is_new) = {
             let mut inner = self.inner.lock().unwrap();
+            let Some(viewer) = inner.viewers.get(&id) else { return };
             // Profiles without Xbox Home may not press the Xbox button.
-            let may_use_home = inner.viewers.get(&id).is_none_or(|v| v.profile.as_ref().is_none_or(|p| p.xbox_home));
-            if !may_use_home {
+            if viewer.profile.as_ref().is_some_and(|p| !p.xbox_home) {
                 state.buttons &= !zeroplay_xbox::input::button::NEXUS;
             }
-            let existing = inner.slots.iter().position(|s| *s == Some((id, local)));
-            match existing {
-                Some(slot) => (slot, false),
-                None => match inner.slots.iter().position(Option::is_none) {
-                    Some(slot) => {
-                        inner.slots[slot] = Some((id, local));
-                        (slot, true)
-                    }
-                    None => {
-                        drop(inner);
-                        self.send_direct(id, Direct::Error { message: "All 4 controller slots are taken. You can still watch.".to_owned() });
-                        return;
-                    }
-                },
+            let profile = viewer.profile.as_ref().map(|p| p.id.clone());
+            let now = Instant::now();
+            match inner.seats.claim(id, local, profile.as_deref(), now) {
+                Some((slot, is_new)) => (inner.seats.input(id, slot, state, now), is_new),
+                None => {
+                    drop(inner);
+                    self.send_direct(id, Direct::Error { message: "All 4 controller slots are taken. You can still watch.".to_owned() });
+                    return;
+                }
             }
         };
-        state.index = slot as u8;
-        self.inner.lock().unwrap().pads[slot] = Some(state);
         if let Some(session) = self.current_session() {
             let _ = session.set_gamepad(state).await;
         }
@@ -266,13 +347,7 @@ impl App {
     }
 
     pub async fn unplug_pad(&self, id: u64, local: u8) {
-        let slot = {
-            let mut inner = self.inner.lock().unwrap();
-            let Some(slot) = inner.slots.iter().position(|s| *s == Some((id, local))) else { return };
-            inner.slots[slot] = None;
-            inner.pads[slot] = None;
-            slot
-        };
+        let Some(slot) = self.inner.lock().unwrap().seats.unplug(id, local) else { return };
         if let Some(session) = self.current_session() {
             let _ = session.remove_gamepad(slot as u8).await;
         }
@@ -485,7 +560,7 @@ impl App {
         }
 
         // Plug in the controllers players were already holding.
-        let pads: Vec<GamepadState> = self.inner.lock().unwrap().pads.iter().flatten().copied().collect();
+        let pads: Vec<GamepadState> = self.inner.lock().unwrap().seats.pad.iter().flatten().copied().collect();
         for pad in pads {
             let _ = session.set_gamepad(pad).await;
         }
@@ -493,7 +568,7 @@ impl App {
         {
             let mut inner = self.inner.lock().unwrap();
             let console_name = match &inner.stream {
-                StreamState::Starting { console_name, .. } => console_name.clone(),
+                StreamState::Starting { console_name, .. } | StreamState::Reconnecting { console_name, .. } => console_name.clone(),
                 _ => String::new(),
             };
             inner.stream = StreamState::Live { console_id: console_id.to_owned(), console_name, title: None };
@@ -504,6 +579,7 @@ impl App {
 
         if let Some(mut events) = events {
             let app = self.clone();
+            let console = console_id.to_owned();
             tokio::spawn(async move {
                 let mut reason = None;
                 while let Some(event) = events.recv().await {
@@ -511,8 +587,12 @@ impl App {
                         SessionEvent::Ready => app.request_keyframe(),
                         SessionEvent::Connection(state) => {
                             if state == "failed" || state == "closed" || state == "disconnected" {
-                                reason = Some(format!("the connection to the console was {state}"));
-                                break;
+                                // Lost, not ended: pause the game and get the stream back.
+                                if app.generation.load(Ordering::SeqCst) == generation {
+                                    println!("[stream] connection {state}; reconnecting");
+                                    app.clone().recover(console.clone(), generation).await;
+                                }
+                                return;
                             }
                         }
                         SessionEvent::TitleInfo(info) => {
@@ -537,8 +617,58 @@ impl App {
         Ok(())
     }
 
+    /// The stream to the console dropped. Pause the game through Xbox Live
+    /// (the Xbox button opens the guide, which pauses most games), then try to
+    /// get the stream back. Players keep their slots meanwhile.
+    fn recover(self: Arc<Self>, console_id: String, generation: u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move { self.recover_now(console_id, generation).await })
+    }
+
+    async fn recover_now(self: Arc<Self>, console_id: String, generation: u64) {
+        let session = self.session.lock().unwrap().take();
+        if let Some(session) = session {
+            let _ = session.shutdown().await;
+        }
+        let console_name = match &self.inner.lock().unwrap().stream {
+            StreamState::Live { console_name, .. } | StreamState::Reconnecting { console_name, .. } => console_name.clone(),
+            _ => String::new(),
+        };
+        let pause = async {
+            let token = self.auth.lock().await.web_token().await?;
+            consoles::press_button(&self.http, &token, &console_id, "Guide").await
+        };
+        match pause.await {
+            Ok(()) => println!("[stream] pressed the Xbox button to pause the game"),
+            Err(error) => println!("[stream] could not pause the game: {error:#}"),
+        }
+        for attempt in 1..=3u32 {
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            self.inner.lock().unwrap().stream =
+                StreamState::Reconnecting { console_id: console_id.clone(), console_name: console_name.clone(), attempt };
+            self.changed();
+            tokio::time::sleep(Duration::from_secs(if attempt == 1 { 2 } else { 10 })).await;
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            match self.run_start(&console_id, generation).await {
+                Ok(()) => {
+                    println!("[stream] reconnected");
+                    return;
+                }
+                Err(error) => println!("[stream] reconnect attempt {attempt} failed: {error:#}"),
+            }
+        }
+        if self.generation.load(Ordering::SeqCst) == generation {
+            self.inner.lock().unwrap().stream =
+                StreamState::Failed { message: "Lost the connection to the Xbox and could not get it back.".to_owned() };
+            self.changed();
+        }
+    }
+
     fn route_rumble(&self, v: zeroplay_xbox::input::Vibration) {
-        let owner = self.inner.lock().unwrap().slots.get(v.gamepad_index as usize).copied().flatten();
+        let owner = self.inner.lock().unwrap().seats.owner.get(v.gamepad_index as usize).copied().flatten();
         if let Some((id, local)) = owner {
             self.send_direct(
                 id,
@@ -585,6 +715,9 @@ impl App {
             StreamState::Live { console_id, console_name, title } => {
                 json!({ "state": "live", "consoleId": console_id, "consoleName": console_name, "title": title })
             }
+            StreamState::Reconnecting { console_id, console_name, attempt } => {
+                json!({ "state": "reconnecting", "consoleId": console_id, "consoleName": console_name, "attempt": attempt })
+            }
             StreamState::Failed { message } => json!({ "state": "failed", "error": message }),
         };
         let consoles: Vec<Value> = inner
@@ -601,7 +734,8 @@ impl App {
             })
             .collect();
         let players: Vec<Value> = inner
-            .slots
+            .seats
+            .owner
             .iter()
             .enumerate()
             .filter_map(|(slot, owner)| {
@@ -613,9 +747,33 @@ impl App {
         let watching: Vec<String> = inner
             .viewers
             .iter()
-            .filter(|(vid, _)| !inner.slots.iter().flatten().any(|(owner, _)| owner == *vid))
+            .filter(|(vid, _)| inner.seats.slots_of(**vid).is_empty())
             .map(|(_, v)| v.name.clone())
             .collect();
+        let admin = inner.viewers.get(&id).and_then(|v| v.profile.as_ref()).filter(|p| self.access.profile(&p.id).is_some_and(|p| p.admin)).map(|_| {
+            let mut view = self.access.admin_view();
+            view["timeRequests"] = inner
+                .seats
+                .time_requests
+                .iter()
+                .map(|r| json!({ "id": r.id, "name": inner.viewers.get(&r.viewer).map(|v| v.name.clone()).unwrap_or_default(), "minutes": r.minutes }))
+                .collect::<Vec<_>>()
+                .into();
+            view
+        });
+        let settings = self.access.settings();
+        let mine = inner.seats.slots_of(id).first().copied();
+        let queue = inner.seats.queue();
+        let turns = json!({
+            "enabled": settings.timed_play,
+            "minutes": settings.turn_minutes,
+            "optedIn": inner.seats.opted_in.contains(&id),
+            "inControl": mine.is_some(),
+            "secondsLeft": mine.and_then(|slot| inner.seats.turn_left(slot, Instant::now())),
+            "waiting": queue.iter().position(|v| *v == id).map(|i| i + 1),
+            "queue": queue.len(),
+            "askedForTime": inner.seats.time_requests.iter().any(|r| r.viewer == id),
+        });
         json!({
             "t": "status",
             "signedIn": inner.signed_in,
@@ -633,7 +791,8 @@ impl App {
                 "profile": inner.viewers.get(&id).and_then(|v| v.profile.as_ref()).map(Profile::public),
             },
             "setupDone": self.access.has_profiles(),
-            "admin": inner.viewers.get(&id).and_then(|v| v.profile.as_ref()).filter(|p| self.access.profile(&p.id).is_some_and(|p| p.admin)).map(|_| self.access.admin_view()),
+            "admin": admin,
+            "turns": turns,
             "playit": self.playit.status(),
         })
     }

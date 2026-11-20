@@ -39,6 +39,23 @@ Open `http://<nas-address>:8080` from your home network:
 Everything is kept in the `/data` folder. To start the profiles over, delete
 `access.json` there and create the admin profile again from home.
 
+While playing:
+
+- **Hand-off:** pressing *Back to home*, or no input for 5 minutes (with a
+  warning 30 seconds before), passes your controller to whoever has waited
+  longest. With nobody else there, the stream stops; it also stops when
+  nobody has been connected for 30 seconds.
+- **Lost connections:** if a player's connection drops, their controller is
+  unplugged on the console (most games pause) and their slot is kept for a
+  minute. If the stream to the Xbox drops, ZeroPlay presses the Xbox button
+  through Xbox Live (the guide pauses most games) and reconnects.
+- **Timed play** (admin setting, under the people icon): players who opt in
+  from the in-game menu take turns, with warnings and a 10 second countdown
+  before switching. More time can be asked for; an admin approves it.
+- **Volume** and **recording** are in the in-game menu, per device. Recordings
+  are made in the browser from the video it already receives, and saved on
+  that device.
+
 With a free playit account the video tunnel gets one port, so one player at a
 time can stream from outside the home; playit premium allows more.
 

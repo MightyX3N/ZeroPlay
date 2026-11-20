@@ -135,20 +135,33 @@ function el(tag, props = {}, ...children) {
 function renderProfiles(s) {
   const admin = s && s.admin;
   show($("btn-profiles"), !!admin);
-  show($("requests-badge"), !!(admin && admin.requests.length));
+  const timeRequests = (admin && admin.timeRequests) || [];
+  show($("requests-badge"), !!(admin && (admin.requests.length || timeRequests.length)));
   show($("profiles"), profilesOpen && !!admin);
   if (!admin) return;
   const key = JSON.stringify(admin) + "|" + editing;
   if (key === lastAdmin) return;
   lastAdmin = key;
   $("allow-requests").checked = admin.settings.allowRequests;
+  $("timed-play").checked = admin.settings.timedPlay;
+  $("turn-minutes").value = String(admin.settings.turnMinutes);
+  if ($("turn-minutes").value !== String(admin.settings.turnMinutes)) {
+    $("turn-minutes").append(el("option", { value: admin.settings.turnMinutes, textContent: `${admin.settings.turnMinutes} minutes` }));
+    $("turn-minutes").value = String(admin.settings.turnMinutes);
+  }
 
-  show($("requests-box"), admin.requests.length > 0);
-  $("requests").replaceChildren(...admin.requests.map((r) => el("div", { className: "item" },
-    el("div", { className: "item-head" },
-      el("span", { className: "name", textContent: r.name }),
-      el("button", { className: "btn primary small", textContent: "Approve", onclick: () => send({ t: "adminAnswer", id: r.id, approve: true }) }),
-      el("button", { className: "btn danger small", textContent: "Reject", onclick: () => send({ t: "adminAnswer", id: r.id, approve: false }) })))));
+  show($("requests-box"), admin.requests.length + timeRequests.length > 0);
+  $("requests").replaceChildren(
+    ...admin.requests.map((r) => el("div", { className: "item" },
+      el("div", { className: "item-head" },
+        el("span", { className: "name", textContent: `${r.name} wants a profile` }),
+        el("button", { className: "btn primary small", textContent: "Approve", onclick: () => send({ t: "adminAnswer", id: r.id, approve: true }) }),
+        el("button", { className: "btn danger small", textContent: "Reject", onclick: () => send({ t: "adminAnswer", id: r.id, approve: false }) })))),
+    ...timeRequests.map((r) => el("div", { className: "item" },
+      el("div", { className: "item-head" },
+        el("span", { className: "name", textContent: `${r.name} asks for ${r.minutes} more minutes` }),
+        el("button", { className: "btn primary small", textContent: "Give time", onclick: () => send({ t: "adminAnswerTime", id: r.id, approve: true }) }),
+        el("button", { className: "btn danger small", textContent: "No", onclick: () => send({ t: "adminAnswerTime", id: r.id, approve: false }) })))));
 
   const me = s.you && s.you.profile && s.you.profile.id;
   $("profile-list").replaceChildren(...admin.profiles.map((p) => {
@@ -192,6 +205,9 @@ function profileEditor(p, isMe) {
 $("btn-profiles").onclick = () => { profilesOpen = true; lastAdmin = ""; renderProfiles(status); };
 $("btn-profiles-close").onclick = () => { profilesOpen = false; editing = null; renderProfiles(status); };
 $("allow-requests").onchange = (event) => send({ t: "adminAllowRequests", allow: event.target.checked });
+const sendTimedPlay = () => send({ t: "adminTimedPlay", enabled: $("timed-play").checked, minutes: Number($("turn-minutes").value) });
+$("timed-play").onchange = sendTimedPlay;
+$("turn-minutes").onchange = sendTimedPlay;
 $("add-profile").onsubmit = (event) => {
   event.preventDefault();
   send({ t: "adminCreate", name: $("add-name").value, password: $("add-password").value, admin: $("add-admin").checked });
@@ -216,6 +232,7 @@ function connect() {
     else if (message.t === "rumble") onRumble(message);
     else if (message.t === "error") toast(message.message);
     else if (message.t === "loggedOut") ws.close();
+    else if (message.t === "notice") onNotice(message);
   };
   ws.onclose = () => {
     $("console-info").textContent = "Lost the connection to the server, retrying…";
@@ -294,13 +311,17 @@ function onStatus(s) {
     if (!watching()) showScreen("waking");
     return;
   }
-  if (stream.state === "live" && wantWatch) {
+  const reconnecting = stream.state === "reconnecting";
+  show($("reconnecting"), reconnecting && watching());
+  if (reconnecting) $("reconnect-text").textContent = `Lost the connection to the Xbox. The game was paused. Reconnecting (try ${stream.attempt} of 3)…`;
+  if ((stream.state === "live" || (reconnecting && watching())) && wantWatch) {
     if (!watching()) startWatching();
     renderMenu();
+    renderTurnChip(s);
     showScreen("stream");
     return;
   }
-  if (stream.state !== "live") {
+  if (stream.state !== "live" && !reconnecting) {
     stopWatching();
     wantWatch = false;
   }
@@ -442,7 +463,9 @@ async function startWatching() {
     media.addTrack(event.track);
     const video = $("video");
     if (video.srcObject !== media) video.srcObject = media;
+    applyAudio();
     video.play().catch(() => {
+      video.dataset.autoplayMuted = "1";
       video.muted = true;
       video.play().catch(() => {});
       show($("tap-to-play"), true);
@@ -478,6 +501,7 @@ async function onAnswer(sdp) {
 }
 
 function stopWatching() {
+  stopRecording();
   if (pc) {
     pc.close();
     pc = null;
@@ -490,7 +514,8 @@ function stopWatching() {
 
 $("btn-unmute").onclick = () => {
   const video = $("video");
-  video.muted = false;
+  delete video.dataset.autoplayMuted;
+  video.muted = muted;
   video.play().catch(() => {});
   show($("tap-to-play"), false);
 };
@@ -544,6 +569,17 @@ function renderMenu() {
   $("m-sens").textContent = `Mouse sensitivity: ${mouseSens}`;
   show($("m-sens"), hasMouse && keyboardOn);
   $("m-players").textContent = separatePlayers ? "Controllers here: separate players" : "Controllers here: one player";
+  const turns = status.turns || {};
+  show($("m-turns"), !!turns.enabled);
+  $("m-turns").textContent = `Take turns: ${turns.optedIn ? "on" : "off"}`;
+  show($("m-more-time"), !!(turns.enabled && turns.inControl && turns.secondsLeft != null && !turns.askedForTime));
+  const turnText = !turns.enabled || !turns.optedIn ? ""
+    : turns.inControl ? (turns.secondsLeft != null ? `Your turn: ${clock(turnLeft())} left` : "Your turn (nobody waiting)")
+    : turns.waiting ? `In line: number ${turns.waiting}` : "";
+  show($("menu-turn"), !!turnText);
+  $("menu-turn").textContent = turnText;
+  $("m-volume").textContent = muted ? "Volume: muted  ◀ ▶" : `Volume: ${volume}%  ◀ ▶`;
+  $("m-record").textContent = recorder ? `Stop recording (${clock(recordSeconds())})` : "Start recording";
   $("m-stats").textContent = statsOn ? "Hide stats" : "Show stats";
   show($("stats"), statsOn);
   const visible = menuItems().filter((el) => !el.classList.contains("hidden"));
@@ -586,6 +622,10 @@ $("m-players").onclick = () => {
   mergedWasActive = false;
   renderMenu();
 };
+$("m-turns").onclick = () => send({ t: "turns", on: !(status && status.turns && status.turns.optedIn) });
+$("m-more-time").onclick = () => send({ t: "requestTime" });
+$("m-volume").onclick = () => { muted = !muted; applyAudio(); renderMenu(); };
+$("m-record").onclick = () => { if (recorder) stopRecording(); else startRecording(); renderMenu(); };
 $("m-sens").onclick = () => {
   mouseSens = SENSITIVITIES[(SENSITIVITIES.indexOf(mouseSens) + 1) % SENSITIVITIES.length];
   localStorage.setItem("zp-mouse-sens", String(mouseSens));
@@ -629,6 +669,7 @@ function padState(gp) {
 }
 
 function sendPad(local, state) {
+  if (state.buttons || state.lx || state.ly || state.rx || state.ry || state.lt || state.rt) hideCountdownOnInput();
   const key = JSON.stringify(state);
   const last = sent.get(local);
   const now = performance.now();
@@ -662,6 +703,10 @@ function navigate(bits, local) {
     if (pressed(local, bits, BTN.down)) menuIndex = (menuIndex + 1) % items.length;
     if (pressed(local, bits, BTN.up)) menuIndex = (menuIndex + items.length - 1) % items.length;
     if (pressed(local, bits, BTN.a)) items[menuIndex].click();
+    if (items[menuIndex] && items[menuIndex].dataset.adjust === "volume") {
+      if (pressed(local, bits, BTN.right)) changeVolume(10);
+      if (pressed(local, bits, BTN.left)) changeVolume(-10);
+    }
     if (pressed(local, bits, BTN.b)) closeMenu();
     if (menuOpen) renderMenu();
   } else if (onHome && status) {
@@ -865,6 +910,11 @@ document.addEventListener("wheel", (event) => {
 window.addEventListener("keydown", (event) => {
   const inStream = !$("stream").classList.contains("hidden");
   if (!inStream) return;
+  if (menuOpen && document.activeElement === $("m-volume") && (event.code === "ArrowLeft" || event.code === "ArrowRight")) {
+    event.preventDefault();
+    changeVolume(event.code === "ArrowRight" ? 10 : -10);
+    return;
+  }
   if (event.code === "F1" || event.code === "Escape") {
     event.preventDefault();
     if (menuOpen) closeMenu(); else openMenu();
@@ -898,6 +948,123 @@ function onRumble(r) {
     leftTrigger: Math.min(1, r.leftTrigger),
     rightTrigger: Math.min(1, r.rightTrigger),
   }).catch(() => {});
+}
+
+// ── Notices, countdowns, turn clock ─────────────────────────────────────────
+
+function clock(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+let countdownTimer = 0;
+function onNotice(message) {
+  if (!message.countdown) return toast(message.text, true);
+  let left = message.countdown;
+  $("countdown-text").textContent = message.text;
+  $("countdown-number").textContent = left;
+  show($("countdown"), true);
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    left -= 1;
+    $("countdown-number").textContent = left;
+    if (left <= 0) { clearInterval(countdownTimer); show($("countdown"), false); }
+  }, 1000);
+}
+
+// Any input during an AFK countdown hides it again (the server resets too).
+function hideCountdownOnInput() {
+  if (!$("countdown").classList.contains("hidden") && /input/i.test($("countdown-text").textContent)) {
+    clearInterval(countdownTimer);
+    show($("countdown"), false);
+  }
+}
+
+let turnInfoAt = 0;
+let turnInfoLeft = null;
+function turnLeft() {
+  return turnInfoLeft == null ? null : turnInfoLeft - (performance.now() - turnInfoAt) / 1000;
+}
+function renderTurnChip(s) {
+  const turns = (s && s.turns) || {};
+  turnInfoLeft = turns.inControl && turns.secondsLeft != null ? turns.secondsLeft : null;
+  turnInfoAt = performance.now();
+}
+setInterval(() => {
+  const left = turnLeft();
+  show($("turn-chip"), left != null);
+  if (left != null) $("turn-chip").textContent = `Turn ${clock(left)}${status && status.turns && status.turns.askedForTime ? " (paused)" : ""}`;
+  if (recorder) $("rec-time").textContent = clock(recordSeconds());
+  if (menuOpen) renderMenu();
+}, 1000);
+
+// ── Audio (per device) ──────────────────────────────────────────────────────
+
+let volume = Number(localStorage.getItem("zp-volume") ?? 100);
+let muted = localStorage.getItem("zp-muted") === "on";
+function applyAudio() {
+  const video = $("video");
+  video.volume = Math.max(0, Math.min(1, volume / 100));
+  video.muted = muted || video.dataset.autoplayMuted === "1";
+  localStorage.setItem("zp-volume", String(volume));
+  localStorage.setItem("zp-muted", muted ? "on" : "off");
+}
+function changeVolume(step) {
+  volume = Math.max(0, Math.min(100, volume + step));
+  if (step > 0) muted = false;
+  applyAudio();
+  renderMenu();
+}
+applyAudio();
+
+// ── Recording (on this device; the stream is not touched) ───────────────────
+
+let recorder = null;
+let recordChunks = [];
+let recordStarted = 0;
+let recordType = "";
+function recordSeconds() {
+  return recorder ? (performance.now() - recordStarted) / 1000 : 0;
+}
+function startRecording() {
+  const stream = $("video").srcObject;
+  if (!stream || typeof MediaRecorder === "undefined") return toast("This browser cannot record.");
+  const types = ["video/mp4;codecs=avc1.640028,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm"];
+  recordType = types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
+  try {
+    recorder = new MediaRecorder(stream, recordType ? { mimeType: recordType, videoBitsPerSecond: 16_000_000 } : undefined);
+  } catch (error) {
+    recorder = null;
+    return toast(`Could not start recording: ${error.message}`);
+  }
+  recordChunks = [];
+  recorder.ondataavailable = (event) => { if (event.data.size) recordChunks.push(event.data); };
+  recorder.onstop = saveRecording;
+  recorder.start(1000);
+  recordStarted = performance.now();
+  show($("rec-chip"), true);
+  toast("Recording on this device.", true);
+}
+function stopRecording() {
+  if (!recorder) return;
+  const r = recorder;
+  recorder = null;
+  show($("rec-chip"), false);
+  r.stop();
+}
+function saveRecording() {
+  const type = recordType.split(";")[0] || "video/webm";
+  const blob = new Blob(recordChunks, { type });
+  recordChunks = [];
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `ZeroPlay ${stamp}.${type.includes("mp4") ? "mp4" : "webm"}`;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+  toast("Recording saved to this device.", true);
 }
 
 checkAccess();

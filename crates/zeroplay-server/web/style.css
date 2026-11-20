@@ -144,5 +144,14 @@ svg.fill { fill: currentColor; stroke: none; }
 @media (max-width: 600px) { .edit { grid-template-columns: minmax(0, 1fr); } }
 .row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 
+.chips { position: absolute; top: 16px; left: 16px; display: flex; gap: 8px; pointer-events: none; }
+.chip { background: rgba(0,0,0,.65); padding: 6px 12px; border-radius: 999px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.chip.rec { color: #ff8a8a; }
+.reconnect { position: absolute; inset: 0; background: rgba(0,0,0,.7); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; padding: 24px; }
+.countdown { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,.75); border-radius: 18px; padding: 24px 36px; text-align: center; pointer-events: none; }
+.countdown p { margin: 0 0 6px; font-size: 18px; }
+.countdown strong { font-size: 64px; font-variant-numeric: tabular-nums; }
+#turn-minutes { min-height: 44px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); font: inherit; }
+
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); background: #2a1515; border: 1px solid #5a2b2b; color: #ffd6d6; padding: 12px 18px; border-radius: 10px; font-size: 14px; z-index: 10; }
 .toast.info { background: var(--panel); border-color: var(--line-strong); color: var(--text); }
