@@ -259,12 +259,16 @@ function renderRemote(s) {
   show($("remote-running"), p.state === "running");
   show($("remote-away"), !home);
   show($("btn-playit-disconnect"), home && p.state !== "off");
-  show($("remote-address-box"), !!p.web);
-  show($("remote-waiting"), p.state === "running" && !p.web);
-  if (p.web) {
-    $("remote-address").href = p.web;
-    $("remote-address").textContent = p.web.replace(/^https?:\/\//, "");
+  const main = p.secure || p.web;
+  show($("remote-address-box"), !!main);
+  show($("remote-waiting"), p.state === "running" && !main);
+  if (main) {
+    $("remote-address").href = main;
+    $("remote-address").textContent = main.replace(/^https?:\/\//, "");
   }
+  show($("remote-secure-tip"), !!p.secure);
+  show($("remote-plain"), !!(p.secure && p.web));
+  if (p.secure && p.web) $("remote-plain").textContent = `Also reachable without https at ${p.web.replace(/^https?:\/\//, "")}`;
   show($("remote-reason"), !!p.reason);
   $("remote-reason").textContent = p.reason || "";
   show($("remote-note"), !!p.note);

@@ -37,12 +37,15 @@ struct Tunnels {
     web: Option<String>,
     /// Host and first port of the video ports, and how many ports.
     video: Option<(String, u16, u16)>,
+    /// `https://…` address of the HTTPS tunnel (Premium, on a playit domain).
+    secure: Option<String>,
     /// Something the person should know (for example a playit limit).
     note: Option<String>,
 }
 
 const WEB_TUNNEL: &str = "ZeroPlay web";
 const VIDEO_TUNNEL: &str = "ZeroPlay video";
+const HTTPS_TUNNEL: &str = "ZeroPlay https";
 
 pub struct Playit {
     secret_path: PathBuf,
@@ -120,6 +123,7 @@ impl Playit {
                 json!({
                     "state": "running",
                     "web": t.web,
+                    "secure": t.secure,
                     "videoPorts": t.video.as_ref().map(|(_, _, count)| *count),
                     "note": t.note,
                 })
@@ -207,7 +211,7 @@ impl Playit {
 
     /// Keeps the two tunnels in place and their addresses up to date.
     async fn manage_tunnels(self: Arc<Self>, generation: u64) {
-        let mut tried: Vec<&'static str> = Vec::new();
+        let mut tried: Vec<String> = Vec::new();
         tokio::time::sleep(Duration::from_secs(3)).await;
         while self.is_current(generation) {
             match self.check_tunnels(&mut tried).await {
@@ -242,7 +246,7 @@ impl Playit {
     }
 
     /// Returns `Ok(false)` when playit says this key may not create tunnels.
-    async fn check_tunnels(&self, tried: &mut Vec<&'static str>) -> Result<bool> {
+    async fn check_tunnels(&self, tried: &mut Vec<String>) -> Result<bool> {
         let data = match self.call_as_agent("/v1/agents/rundata", json!({})).await? {
             ApiResult::Success(data) => data,
             other => bail!("playit.gg would not list the tunnels: {}", describe(&other)),
@@ -255,7 +259,7 @@ impl Playit {
         // A tunnel counts by its name, or by where it points (so tunnels made by
         // hand on playit.gg are found too).
         let video_port = self.rtc_ports.first().copied().unwrap_or(50000);
-        let target = |name: &str| if name == WEB_TUNNEL { ("tcp", self.web_port) } else { ("udp", video_port) };
+        let target = |name: &str| if name == VIDEO_TUNNEL { ("udp", video_port) } else { ("tcp", self.web_port) };
         let matches = |t: &Value, name: &str| {
             if t.get("name").and_then(Value::as_str) == Some(name) {
                 return true;
@@ -268,8 +272,12 @@ impl Playit {
                     .and_then(|f| f.get("value").and_then(Value::as_str))
                     .and_then(|v| v.trim().parse::<u16>().ok())
             };
-            if kind == "tcp" && field("http_port") == Some(port) {
-                return true;
+            let is_https = t.get("tunnel_type").and_then(Value::as_str) == Some("https");
+            if name == HTTPS_TUNNEL {
+                return is_https && field("http_port") == Some(self.web_port);
+            }
+            if is_https {
+                return false;
             }
             t.get("port_type").and_then(Value::as_str) == Some(kind) && field("local_port") == Some(port)
         };
@@ -278,8 +286,8 @@ impl Playit {
         let read_only = |error: &anyhow::Error| error.to_string().contains("NotAllowedWithReadOnly");
 
         let mut notes: Vec<String> = Vec::new();
-        if find(WEB_TUNNEL).is_none() && !is_pending(WEB_TUNNEL) && !tried.contains(&WEB_TUNNEL) {
-            tried.push(WEB_TUNNEL);
+        if find(WEB_TUNNEL).is_none() && !is_pending(WEB_TUNNEL) && !tried.iter().any(|t| t == WEB_TUNNEL) {
+            tried.push(WEB_TUNNEL.to_owned());
             if let Err(error) = self.create_web_tunnel(&agent_id, premium).await {
                 if read_only(&error) {
                     tried.clear();
@@ -288,8 +296,8 @@ impl Playit {
                 notes.push(format!("Could not create the page tunnel: {error:#}"));
             }
         }
-        if find(VIDEO_TUNNEL).is_none() && !is_pending(VIDEO_TUNNEL) && !tried.contains(&VIDEO_TUNNEL) {
-            tried.push(VIDEO_TUNNEL);
+        if find(VIDEO_TUNNEL).is_none() && !is_pending(VIDEO_TUNNEL) && !tried.iter().any(|t| t == VIDEO_TUNNEL) {
+            tried.push(VIDEO_TUNNEL.to_owned());
             let count = self.rtc_ports.len().min(u16::MAX as usize) as u16;
             if let Err(error) = self.create_video_tunnel(&agent_id, count).await {
                 if read_only(&error) {
@@ -308,7 +316,17 @@ impl Playit {
             }
         }
 
+        // HTTPS on a playit domain (Premium): needed for the iPhone home-screen app.
+        if premium && find(HTTPS_TUNNEL).is_none() && !is_pending(HTTPS_TUNNEL) {
+            match self.create_https_tunnel(&agent_id, tried).await {
+                Ok(None) => {}
+                Ok(Some(message)) => notes.push(message),
+                Err(error) => notes.push(format!("Could not create the https tunnel: {error:#}")),
+            }
+        }
+
         let address = |tunnel: &Value| tunnel.get("display_address").and_then(Value::as_str).map(str::to_owned);
+        let secure = find(HTTPS_TUNNEL).and_then(|t| address(&t)).map(|a| format!("https://{}", a.trim_end_matches(":443")));
         let web = find(WEB_TUNNEL).and_then(|t| {
             let https = t.get("tunnel_type").and_then(Value::as_str) == Some("https");
             address(&t).map(|a| format!("{}{a}", if https { "https://" } else { "http://" }))
@@ -320,8 +338,9 @@ impl Playit {
         });
         let mut current = self.tunnels.lock().unwrap();
         // Keep only the lasting "free account" note once nothing new went wrong.
-        let note = if notes.is_empty() { current.note.clone().filter(|n| n.starts_with("Free playit")) } else { Some(notes.join(" ")) };
-        let new = Tunnels { web, video, note };
+        let lasting = |n: &String| n.starts_with("Free playit") || n.starts_with("For an https address");
+        let note = if notes.is_empty() { current.note.clone().filter(lasting) } else { Some(notes.join(" ")) };
+        let new = Tunnels { web, video, secure, note };
         if *current != new {
             *current = new;
             drop(current);
@@ -391,6 +410,74 @@ impl Playit {
         }
         errors.dedup();
         bail!("{}", errors.join("; "))
+    }
+
+    /// Finds a free domain on the playit account and puts an HTTPS tunnel on
+    /// it. Returns a message for the person when there is no free domain.
+    async fn create_https_tunnel(&self, agent_id: &str, tried: &mut Vec<String>) -> Result<Option<String>> {
+        let domains = match self.call_as_agent("/domains/list", json!({})).await? {
+            ApiResult::Success(data) => data.get("domains").and_then(Value::as_array).cloned().unwrap_or_default(),
+            other => bail!("playit.gg would not list the domains: {}", describe(&other)),
+        };
+        let free: Vec<&Value> = domains.iter().filter(|d| d.get("target").is_none_or(Value::is_null)).collect();
+        let pick = free
+            .iter()
+            .find(|d| d.get("name").and_then(Value::as_str).is_some_and(|n| n.to_ascii_lowercase().contains("zeroplay")))
+            .or_else(|| free.first())
+            .copied();
+        let Some(domain) = pick else {
+            return Ok(Some(
+                "For an https address (needed for the iPhone home-screen app), claim a free .playit.plus domain on playit.gg (Premium includes 3). ZeroPlay then uses it by itself."
+                    .to_owned(),
+            ));
+        };
+        let id = domain.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let name = domain.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+        if id.is_empty() || tried.contains(&id) {
+            return Ok(None);
+        }
+        tried.push(id.clone());
+
+        let port = self.web_port.to_string();
+        let protocol = json!({ "type": "tunnel-type", "details": "https" });
+        let fields = json!([
+            { "name": "local_ip", "value": "127.0.0.1" },
+            { "name": "http_port", "value": port },
+            { "name": "https_port", "value": port },
+            { "name": "tls_termination", "value": "letsencrypt" },
+        ]);
+        // playit's request for a tunnel on a domain: tried in the shapes its
+        // website and its client code use.
+        let shapes = [
+            json!({ "endpoint": { "type": "hostname", "details": { "hostname_id": id } } }),
+            json!({ "endpoint": { "type": "domain", "details": { "domain_id": id } } }),
+            json!({ "alloc": { "type": "hostname", "details": { "hostname_id": id } } }),
+        ];
+        let mut errors = Vec::new();
+        for extra in shapes {
+            let mut body = json!({
+                "name": HTTPS_TUNNEL,
+                "protocol": protocol,
+                "origin": { "type": "agent", "data": { "agent_id": agent_id, "config": { "fields": fields } } },
+                "enabled": true,
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            match self.call_as_agent("/v1/tunnels/create", body).await? {
+                ApiResult::Success(_) => {
+                    println!("[playit] created the https tunnel on {name}");
+                    return Ok(None);
+                }
+                other => {
+                    let why = describe(&other);
+                    println!("[playit] https tunnel on {name} refused: {why}");
+                    errors.push(why);
+                }
+            }
+        }
+        errors.dedup();
+        bail!("on {name}: {}", errors.join("; "))
     }
 
     /// The video: raw UDP ports to the media ports.
