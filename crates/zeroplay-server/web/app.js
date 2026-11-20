@@ -468,7 +468,10 @@ function gamesOf(s, consoleId) {
 
 function renderGames(s, current) {
   const games = current ? gamesOf(s, current.id) : [];
-  show($("games-shelf"), games.length > 0);
+  const note = current ? ((s.gamesNote || {})[current.id] || "") : "";
+  show($("games-shelf"), games.length > 0 || !!note);
+  show($("games-note"), !!note);
+  $("games-note").textContent = note;
   if (!games.find((g) => g.id === selectedGame)) selectedGame = games[0] ? games[0].id : null;
   if (!games.length && homeRow === "games") homeRow = "consoles";
   $("games-title").textContent = current ? `Games on ${current.name}` : "Games";

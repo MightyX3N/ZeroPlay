@@ -136,7 +136,19 @@ pub struct InstalledApp {
     #[serde(default)]
     pub is_game: bool,
     #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
     pub last_active_time: Option<String>,
+}
+
+impl InstalledApp {
+    pub fn looks_like_a_game(&self) -> bool {
+        self.is_game
+            || self
+                .content_type
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("game"))
+    }
 }
 
 #[derive(Deserialize)]

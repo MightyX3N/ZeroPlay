@@ -101,6 +101,8 @@ struct Inner {
     stream_quality: Option<Quality>,
     /// Installed games per console, and when they were read.
     games: HashMap<String, (Instant, Vec<Game>)>,
+    /// Why a console's game list is empty (an error, or nothing found).
+    games_note: HashMap<String, String>,
 }
 
 /// A game installed on a console.
@@ -178,6 +180,7 @@ impl App {
                 watchers: HashSet::new(),
                 stream_quality: None,
                 games: HashMap::new(),
+                games_note: HashMap::new(),
             }),
             session: Mutex::new(None),
             generation: AtomicU64::new(0),
@@ -710,7 +713,6 @@ impl App {
             .unwrap()
             .consoles
             .iter()
-            .filter(|c| c.power_state == "On" || c.power_state == "ConnectedStandby")
             .map(|c| c.id.clone())
             .collect();
         for console in awake {
@@ -736,7 +738,9 @@ impl App {
         let result = async {
             let token = self.auth.lock().await.web_token().await?;
             let mut apps = consoles::installed_apps(&self.http, &token, console_id).await?;
-            apps.retain(|a| a.is_game && a.one_store_product_id.is_some());
+            let reported = apps.len();
+            println!("[games] {console_id} reported {reported} installed apps");
+            apps.retain(|a| a.looks_like_a_game() && a.one_store_product_id.is_some());
             // Most recently played first.
             apps.sort_by(|a, b| b.last_active_time.cmp(&a.last_active_time));
             apps.dedup_by(|a, b| a.one_store_product_id == b.one_store_product_id);
@@ -752,7 +756,8 @@ impl App {
                     Default::default()
                 }
             };
-            anyhow::Ok(
+            anyhow::Ok((
+                reported,
                 apps.into_iter()
                     .map(|a| Game {
                         id: a.one_store_product_id.unwrap_or_default(),
@@ -760,20 +765,37 @@ impl App {
                         image: art.get(&a.title_id).cloned(),
                     })
                     .collect::<Vec<_>>(),
-            )
+            ))
         }
         .await;
-        match result {
-            Ok(games) => {
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .games
-                    .insert(console_id.to_owned(), (Instant::now(), games));
-                self.changed();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            match result {
+                Ok((reported, games)) => {
+                    if games.is_empty() {
+                        inner.games_note.insert(
+                            console_id.to_owned(),
+                            format!(
+                                "No games found (the console listed {reported} installed apps)."
+                            ),
+                        );
+                    } else {
+                        inner.games_note.remove(console_id);
+                    }
+                    inner
+                        .games
+                        .insert(console_id.to_owned(), (Instant::now(), games));
+                }
+                Err(error) => {
+                    println!("[games] could not read the games on {console_id}: {error:#}");
+                    inner.games_note.insert(
+                        console_id.to_owned(),
+                        format!("Could not read the games: {error:#}"),
+                    );
+                }
             }
-            Err(error) => println!("[games] could not read the games on {console_id}: {error:#}"),
         }
+        self.changed();
     }
 
     /// Starts a game: wakes the console, launches the game, and starts the
@@ -1270,6 +1292,7 @@ impl App {
             "games": games,
             // Every game on every console, for the admin's profile editor.
             "allGames": all_games,
+            "gamesNote": inner.games_note.clone(),
             "admin": admin,
             "turns": turns,
             "quality": {
