@@ -17,18 +17,20 @@ No game library, rebinding or apps yet.
 
 ## Run the server
 
-On the NAS (or any Linux machine on the same network as the Xbox):
-
-```
-git clone https://github.com/MightyX3N/ZeroPlay
-cd ZeroPlay
-docker compose up -d --build
-```
+On the NAS (or any Linux machine on the same network as the Xbox), use
+[`docker-compose.yml`](docker-compose.yml): paste it into the NAS's container
+manager (Portainer, Synology Container Manager, Unraid, TrueNAS) or save it and
+run `docker compose up -d`. It pulls the ready-made image
+`ghcr.io/mightyx3n/zeroplay:latest` (amd64 and arm64), so nothing is built on
+the NAS.
 
 Open `http://<nas-address>:8080`, press **Get a sign-in code** and enter the
-code at microsoft.com/link. The sign-in is kept in `zeroplay-data/`.
+code at microsoft.com/link. The sign-in is kept in the `/data` folder.
 
-Settings are in `docker-compose.yml`:
+To build the image yourself instead: `docker build -t zeroplay .` and change
+`image:` in the compose file to `zeroplay`.
+
+Settings (environment variables in the compose file):
 
 | Setting | What it does |
 | --- | --- |
