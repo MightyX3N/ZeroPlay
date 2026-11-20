@@ -7,6 +7,10 @@ const show = (el, on) => el.classList.toggle("hidden", !on);
 const screens = ["home", "login", "setup", "notsetup", "signin", "waking", "stream"];
 function showScreen(name) {
   for (const s of screens) show($(s), s === name);
+  // A text field on a screen that is now hidden must not keep the focus:
+  // on iOS that takes the controller input away from the page.
+  const active = document.activeElement;
+  if (active && active !== document.body && active.closest && active.closest(".hidden")) active.blur();
 }
 
 let toastTimer = 0;
@@ -53,7 +57,9 @@ async function checkAccess() {
     if (access.verdict === "loginNeeded") {
       setRequestMode(false);
       showScreen("login");
-      $("login-name").focus();
+      // No automatic focus on phones: a text field that keeps the focus after
+      // logging in takes the controller input away from the page on iOS.
+      if (window.matchMedia("(pointer: fine)").matches) $("login-name").focus();
     } else {
       showScreen("notsetup");
     }
@@ -95,6 +101,9 @@ $("login-form").onsubmit = async (event) => {
   $("login-error").textContent = error || "";
   if (error) return;
   $("login-password").value = "";
+  // Give the focus back to the page, or iOS keeps sending input to the
+  // (now hidden) text field and the controller is never seen.
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
   if (requestMode) {
     setRequestMode(false);
     show($("login-done"), true);
