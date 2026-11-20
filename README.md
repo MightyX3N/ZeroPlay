@@ -27,14 +27,17 @@ the NAS.
 Open `http://<nas-address>:8080` from your home network:
 
 1. Press **Get a sign-in code** and enter the code at microsoft.com/link.
-2. Choose a password. Everyone uses it to open ZeroPlay, at home and from
-   outside. It can only be set from the home network.
+2. Create the admin profile (name and password). This can only be done from
+   the home network. The admin adds more profiles under the people icon, and
+   can switch on *Allow access requests* so others can ask for a profile from
+   the login page. Per profile the admin sets whether it may open Xbox Home
+   and its highest stream quality.
 3. For use outside your home, press the globe icon and open the playit.gg
    claim link it shows. Once approved, ZeroPlay creates its playit tunnels
    itself and shows the address to use.
 
-Everything is kept in the `/data` folder. To reset the password, delete
-`access.json` there and set a new one from home.
+Everything is kept in the `/data` folder. To start the profiles over, delete
+`access.json` there and create the admin profile again from home.
 
 With a free playit account the video tunnel gets one port, so one player at a
 time can stream from outside the home; playit premium allows more.

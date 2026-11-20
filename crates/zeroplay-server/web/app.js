@@ -4,7 +4,7 @@
 
 const $ = (id) => document.getElementById(id);
 const show = (el, on) => el.classList.toggle("hidden", !on);
-const screens = ["home", "login", "setpass", "notsetup", "signin", "waking", "stream"];
+const screens = ["home", "login", "setup", "notsetup", "signin", "waking", "stream"];
 function showScreen(name) {
   for (const s of screens) show($(s), s === name);
 }
@@ -41,45 +41,165 @@ function send(message) {
 
 // ── Getting in: the password ────────────────────────────────────────────────
 
+let requestsOpen = false;
+let requestMode = false;
+
 async function checkAccess() {
   try {
     const response = await fetch("/api/access", { cache: "no-store" });
     const access = await response.json();
+    requestsOpen = !!access.requestsOpen;
     if (access.verdict === "ok") return connect();
-    showScreen(access.verdict === "loginNeeded" ? "login" : "notsetup");
-    if (access.verdict === "loginNeeded") $("login-password").focus();
+    if (access.verdict === "loginNeeded") {
+      setRequestMode(false);
+      showScreen("login");
+      $("login-name").focus();
+    } else {
+      showScreen("notsetup");
+    }
   } catch {
     setTimeout(checkAccess, 2000);
   }
 }
 
-async function postPassword(url, password) {
+async function postForm(url, body) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(body),
   });
   if (response.ok) return null;
-  const body = await response.json().catch(() => ({}));
-  return body.error || "That did not work.";
+  const answer = await response.json().catch(() => ({}));
+  return answer.error || "That did not work.";
 }
+
+function setRequestMode(on) {
+  requestMode = on;
+  $("login-title").textContent = on ? "Request access" : "ZeroPlay";
+  show($("login-intro"), on);
+  $("login-submit").textContent = on ? "Send request" : "Log in";
+  $("login-switch").textContent = on ? "Back to log in" : "Request access";
+  show($("login-switch"), requestsOpen || on);
+  $("login-password").autocomplete = on ? "new-password" : "current-password";
+  show($("login-error"), false);
+  show($("login-done"), false);
+}
+
+$("login-switch").onclick = () => setRequestMode(!requestMode);
 
 $("login-form").onsubmit = async (event) => {
   event.preventDefault();
-  const error = await postPassword("/api/login", $("login-password").value);
+  const body = { name: $("login-name").value, password: $("login-password").value };
+  const error = await postForm(requestMode ? "/api/request" : "/api/login", body);
   show($("login-error"), !!error);
   $("login-error").textContent = error || "";
-  if (!error) { $("login-password").value = ""; checkAccess(); }
+  if (error) return;
+  $("login-password").value = "";
+  if (requestMode) {
+    setRequestMode(false);
+    show($("login-done"), true);
+    $("login-done").textContent = "Request sent. You can log in once the admin approves it.";
+  } else {
+    checkAccess();
+  }
 };
 
-$("setpass-form").onsubmit = async (event) => {
+$("setup-form").onsubmit = async (event) => {
   event.preventDefault();
-  const password = $("setpass-password").value;
-  let error = password !== $("setpass-again").value ? "The two passwords are not the same." : null;
-  if (!error) error = await postPassword("/api/password", password);
-  show($("setpass-error"), !!error);
-  $("setpass-error").textContent = error || "";
-  if (!error) { $("setpass-password").value = $("setpass-again").value = ""; }
+  const password = $("setup-password").value;
+  let error = password !== $("setup-again").value ? "The two passwords are not the same." : null;
+  if (!error) error = await postForm("/api/setup", { name: $("setup-name").value, password });
+  show($("setup-error"), !!error);
+  $("setup-error").textContent = error || "";
+  if (!error) $("setup-password").value = $("setup-again").value = "";
+};
+
+$("btn-logout").onclick = async () => {
+  await fetch("/api/logout", { method: "POST" }).catch(() => {});
+  if (ws) ws.close();
+};
+
+// ── Profiles (admins) ───────────────────────────────────────────────────────
+
+let profilesOpen = false;
+let lastAdmin = "";
+let editing = null;
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  node.append(...children.filter((c) => c !== null && c !== undefined));
+  return node;
+}
+
+function renderProfiles(s) {
+  const admin = s && s.admin;
+  show($("btn-profiles"), !!admin);
+  show($("requests-badge"), !!(admin && admin.requests.length));
+  show($("profiles"), profilesOpen && !!admin);
+  if (!admin) return;
+  const key = JSON.stringify(admin) + "|" + editing;
+  if (key === lastAdmin) return;
+  lastAdmin = key;
+  $("allow-requests").checked = admin.settings.allowRequests;
+
+  show($("requests-box"), admin.requests.length > 0);
+  $("requests").replaceChildren(...admin.requests.map((r) => el("div", { className: "item" },
+    el("div", { className: "item-head" },
+      el("span", { className: "name", textContent: r.name }),
+      el("button", { className: "btn primary small", textContent: "Approve", onclick: () => send({ t: "adminAnswer", id: r.id, approve: true }) }),
+      el("button", { className: "btn danger small", textContent: "Reject", onclick: () => send({ t: "adminAnswer", id: r.id, approve: false }) })))));
+
+  const me = s.you && s.you.profile && s.you.profile.id;
+  $("profile-list").replaceChildren(...admin.profiles.map((p) => {
+    const head = el("div", { className: "item-head" },
+      el("span", { className: "name", textContent: p.name }),
+      p.admin ? el("span", { className: "tag", textContent: "Admin" }) : null,
+      p.id === me ? el("span", { className: "tag", textContent: "You" }) : null,
+      el("button", { className: "btn secondary small", textContent: editing === p.id ? "Close" : "Edit", onclick: () => { editing = editing === p.id ? null : p.id; renderProfiles(status); } }));
+    const item = el("div", { className: "item" }, head);
+    if (editing === p.id) item.append(profileEditor(p, p.id === me));
+    return item;
+  }));
+}
+
+function profileEditor(p, isMe) {
+  const name = el("input", { value: p.name, maxLength: 24, ariaLabel: "Name" });
+  const password = el("input", { type: "password", placeholder: "New password (leave empty to keep)", minLength: 8, autocomplete: "new-password", ariaLabel: "New password" });
+  const admin = el("input", { type: "checkbox", checked: p.admin });
+  const home = el("input", { type: "checkbox", checked: p.xboxHome });
+  const quality = el("select", { ariaLabel: "Highest quality" },
+    ...["max", "high", "medium", "low"].map((q) => el("option", { value: q, textContent: q[0].toUpperCase() + q.slice(1), selected: p.maxQuality === q })));
+  const save = el("button", { className: "btn primary small", textContent: "Save", onclick: () => {
+    const changes = { name: name.value, admin: admin.checked, xboxHome: home.checked, maxQuality: quality.value };
+    if (password.value) changes.password = password.value;
+    send({ t: "adminUpdate", id: p.id, changes });
+    editing = null;
+  } });
+  const remove = el("button", { className: "btn danger small", textContent: "Delete profile", onclick: () => {
+    if (window.confirm(`Delete the profile "${p.name}"? They are logged out everywhere.`)) send({ t: "adminDelete", id: p.id });
+  } });
+  return el("div", { className: "edit" },
+    el("label", { className: "field" }, "Name", name),
+    el("label", { className: "field" }, "Password", password),
+    el("label", { className: "check" }, admin, "Admin (manages profiles and remote access)"),
+    el("label", { className: "check" }, home, "May open Xbox Home and press the Xbox button"),
+    el("label", { className: "field" }, "Highest stream quality", quality),
+    el("p", { className: "muted small full", textContent: "Which games this profile may play is set here once the game library is added." }),
+    el("div", { className: "item-actions full" }, save, isMe ? null : remove));
+}
+
+$("btn-profiles").onclick = () => { profilesOpen = true; lastAdmin = ""; renderProfiles(status); };
+$("btn-profiles-close").onclick = () => { profilesOpen = false; editing = null; renderProfiles(status); };
+$("allow-requests").onchange = (event) => send({ t: "adminAllowRequests", allow: event.target.checked });
+$("add-profile").onsubmit = (event) => {
+  event.preventDefault();
+  send({ t: "adminCreate", name: $("add-name").value, password: $("add-password").value, admin: $("add-admin").checked });
+  $("add-name").value = $("add-password").value = "";
+  $("add-admin").checked = false;
+};
+$("btn-ms-signout").onclick = () => {
+  if (window.confirm("Sign this server out of your Microsoft account? Nobody can stream until it is signed in again.")) send({ t: "logout" });
 };
 
 function connect() {
@@ -95,6 +215,7 @@ function connect() {
     else if (message.t === "answer") onAnswer(message.sdp);
     else if (message.t === "rumble") onRumble(message);
     else if (message.t === "error") toast(message.message);
+    else if (message.t === "loggedOut") ws.close();
   };
   ws.onclose = () => {
     $("console-info").textContent = "Lost the connection to the server, retrying…";
@@ -114,7 +235,8 @@ function renderRemote(s) {
   if (!s) return;
   const p = s.playit || { state: "off" };
   show($("remote"), remoteOpen);
-  const home = !!(s.you && s.you.home);
+  // Only an admin at home (or whoever does the first setup) links or unlinks playit.
+  const home = !!(s.you && s.you.home) && (!!s.admin || !s.setupDone);
   show($("remote-off"), home && (p.state === "off" || p.state === "failed"));
   show($("remote-claiming"), p.state === "claiming");
   show($("remote-running"), p.state === "running");
@@ -151,6 +273,8 @@ $("btn-playit-disconnect").onclick = () => {
 function onStatus(s) {
   status = s;
   renderRemote(s);
+  renderProfiles(s);
+  $("me-name").textContent = (s.you && s.you.profile && s.you.profile.name) || "Setup";
   const stream = s.stream;
   if (stream.state === "failed" && stream.error !== lastError) toast(stream.error);
   lastError = stream.state === "failed" ? stream.error : "";
@@ -161,8 +285,8 @@ function onStatus(s) {
     showScreen("signin");
     return;
   }
-  if (!s.passwordSet) {
-    showScreen("setpass");
+  if (!s.setupDone) {
+    showScreen("setup");
     return;
   }
   if (stream.state === "starting") {
@@ -286,16 +410,12 @@ function renderPlayers(s) {
 // ── Buttons ──────────────────────────────────────────────────────────────────
 
 $("btn-login").onclick = () => send({ t: "login" });
-$("btn-signout").onclick = () => { if (confirmSignOut()) send({ t: "logout" }); };
 $("btn-refresh").onclick = () => send({ t: "refresh" });
 $("btn-wake").onclick = () => { if (selected) { send({ t: "wake", id: selected }); toast("Asked the console to wake up.", true); } };
 $("btn-stop").onclick = () => send({ t: "stop" });
 $("btn-cancel").onclick = () => send({ t: "stop" });
 $("btn-play").onclick = play;
 
-function confirmSignOut() {
-  return window.confirm("Sign this server out of your Microsoft account?");
-}
 
 function play() {
   if (!status || !selected) return;

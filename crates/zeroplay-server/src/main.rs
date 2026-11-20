@@ -80,8 +80,9 @@ fn router(app: Arc<App>, door: Door) -> Router {
         .route("/app.js", get(|| async { page(APP_JS, "text/javascript; charset=utf-8") }))
         .route("/style.css", get(|| async { page(STYLE_CSS, "text/css; charset=utf-8") }))
         .route("/api/access", get(access_state))
-        .route("/api/password", post(set_password))
+        .route("/api/setup", post(setup))
         .route("/api/login", post(login))
+        .route("/api/request", post(request_access))
         .route("/api/logout", post(logout))
         .route("/ws", get(ws_upgrade))
         .layer(Extension(door))
@@ -100,11 +101,17 @@ async fn access_state(
     headers: HeaderMap,
 ) -> Response {
     let verdict = app.access.verdict(door, peer, &headers);
-    Json(json!({ "verdict": verdict, "home": at_home(door, peer), "passwordSet": app.access.has_password() })).into_response()
+    Json(json!({
+        "verdict": verdict.name(),
+        "home": at_home(door, peer),
+        "requestsOpen": app.access.requests_open(),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
-struct PasswordForm {
+struct ProfileForm {
+    name: String,
     password: String,
 }
 
@@ -116,30 +123,38 @@ fn refused(message: impl std::fmt::Display) -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": message.to_string() }))).into_response()
 }
 
-async fn set_password(
+/// The first profile: the admin. From home only.
+async fn setup(
     State(app): State<Arc<App>>,
     Extension(door): Extension<Door>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Json(form): Json<PasswordForm>,
+    Json(form): Json<ProfileForm>,
 ) -> Response {
-    let result = if app.access.has_password() {
-        app.access.change_password(door, peer, &headers, &form.password).await
-    } else {
-        app.access.set_password(door, peer, &form.password).await
-    };
-    match result {
+    match app.access.create_admin(door, peer, &form.name, &form.password).await {
         Ok(token) => {
-            app.changed();
+            let admin = app.access.admin_view()["profiles"][0]["id"].as_str().and_then(|id| app.access.profile(id));
+            if let Some(admin) = admin {
+                app.adopt_first_profile(&admin);
+            }
             with_cookie(access::session_cookie(&token))
         }
         Err(error) => refused(format!("{error:#}")),
     }
 }
 
-async fn login(State(app): State<Arc<App>>, Json(form): Json<PasswordForm>) -> Response {
-    match app.access.login(&form.password).await {
+async fn login(State(app): State<Arc<App>>, Json(form): Json<ProfileForm>) -> Response {
+    match app.access.login(&form.name, &form.password).await {
         Ok(token) => with_cookie(access::session_cookie(&token)),
+        Err(error) => refused(format!("{error:#}")),
+    }
+}
+
+async fn request_access(State(app): State<Arc<App>>, Json(form): Json<ProfileForm>) -> Response {
+    match app.access.request_access(&form.name, &form.password).await {
+        Ok(()) => {
+            app.changed();
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(error) => refused(format!("{error:#}")),
     }
 }
@@ -156,18 +171,17 @@ async fn ws_upgrade(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if app.access.verdict(door, peer, &headers) != Verdict::Ok {
+    let Verdict::Ok(profile) = app.access.verdict(door, peer, &headers) else {
         return (StatusCode::UNAUTHORIZED, "Log in first").into_response();
-    }
+    };
     let home = at_home(door, peer);
-    ws.on_upgrade(move |socket| client(app, socket, home))
+    ws.on_upgrade(move |socket| client(app, socket, home, profile))
 }
 
 /// Messages from the page.
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 enum FromPage {
-    Name { name: String },
     Login,
     Logout,
     Refresh,
@@ -183,10 +197,16 @@ enum FromPage {
     Keyframe,
     PlayitConnect,
     PlayitDisconnect,
+    // The admin's profile management.
+    AdminCreate { name: String, password: String, admin: bool },
+    AdminUpdate { id: String, changes: access::ProfileChanges },
+    AdminDelete { id: String },
+    AdminAnswer { id: String, approve: bool },
+    AdminAllowRequests { allow: bool },
 }
 
-async fn client(app: Arc<App>, socket: WebSocket, home: bool) {
-    let (id, mut direct) = app.add_viewer(home);
+async fn client(app: Arc<App>, socket: WebSocket, home: bool, profile: Option<access::Profile>) {
+    let (id, mut direct) = app.add_viewer(home, profile);
     let (mut sink, mut stream) = socket.split();
     let mut updates = app.subscribe_updates();
     let mut peer: Option<ViewerPeer> = None;
@@ -226,13 +246,28 @@ async fn client(app: Arc<App>, socket: WebSocket, home: bool) {
     app.remove_viewer(id).await;
 }
 
+/// Admin, or nobody has a profile yet (first setup at home).
+fn is_admin(app: &Arc<App>, id: u64) -> bool {
+    match app.viewer_profile(id) {
+        Some(profile) => profile.admin,
+        None => !app.access.has_profiles(),
+    }
+}
+
+fn admin_done(app: &Arc<App>, result: Result<()>) -> Option<Direct> {
+    app.refresh_profiles();
+    match result {
+        Ok(()) => None,
+        Err(e) => error(format!("{e:#}")),
+    }
+}
+
 fn error(message: impl std::fmt::Display) -> Option<Direct> {
     Some(Direct::Error { message: message.to_string() })
 }
 
 async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &mut Option<ViewerPeer>) -> Option<Direct> {
     match message {
-        FromPage::Name { name } => app.set_name(id, &name),
         FromPage::Login => app.login().await,
         FromPage::Logout => app.logout().await,
         FromPage::Refresh => app.refresh_consoles().await,
@@ -289,9 +324,23 @@ async fn handle(app: &Arc<App>, id: u64, home: bool, message: FromPage, peer: &m
             app.send_mouse(MouseFrame { x: dx, y: dy, wheel_y: wheel, buttons, ..Default::default() })
         }
         FromPage::Keyframe => app.request_keyframe(),
-        FromPage::PlayitConnect | FromPage::PlayitDisconnect if !home => {
-            return error("Remote access can only be changed from your home network.");
+        FromPage::PlayitConnect | FromPage::PlayitDisconnect if !home || !is_admin(app, id) => {
+            return error("Remote access can only be changed by an admin on your home network.");
         }
+        FromPage::AdminCreate { .. }
+        | FromPage::AdminUpdate { .. }
+        | FromPage::AdminDelete { .. }
+        | FromPage::AdminAnswer { .. }
+        | FromPage::AdminAllowRequests { .. }
+            if !is_admin(app, id) =>
+        {
+            return error("Only an admin can change profiles.");
+        }
+        FromPage::AdminCreate { name, password, admin } => return admin_done(app, app.access.create_profile(&name, &password, admin).await),
+        FromPage::AdminUpdate { id: profile, changes } => return admin_done(app, app.access.update_profile(&profile, changes).await),
+        FromPage::AdminDelete { id: profile } => return admin_done(app, app.access.delete_profile(&profile).await),
+        FromPage::AdminAnswer { id: request, approve } => return admin_done(app, app.access.answer_request(&request, approve).await),
+        FromPage::AdminAllowRequests { allow } => return admin_done(app, app.access.set_allow_requests(allow).await),
         FromPage::PlayitConnect => app.playit.connect(),
         FromPage::PlayitDisconnect => app.playit.disconnect().await,
     }

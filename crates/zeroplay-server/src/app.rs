@@ -17,7 +17,7 @@ use zeroplay_xbox::input::{GamepadState, KeyboardFrame, MouseFrame};
 use zeroplay_xbox::reqwest;
 use zeroplay_xbox::session::{start_home_session, MediaPacket, Session, SessionEvent, StreamOptions};
 
-use crate::access::Access;
+use crate::access::{Access, Profile};
 use crate::config::Config;
 use crate::playit::Playit;
 
@@ -31,6 +31,8 @@ pub enum Direct {
     Answer { sdp: String },
     Rumble { local: u8, left: f32, right: f32, left_trigger: f32, right_trigger: f32, ms: u16 },
     Error { message: String },
+    /// This player's profile was deleted or changed; the page checks its login again.
+    LoggedOut,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +47,8 @@ struct Viewer {
     name: String,
     /// On the home network (through the home port).
     home: bool,
+    /// The logged-in profile (none only during first setup).
+    profile: Option<Profile>,
     direct: mpsc::UnboundedSender<Direct>,
 }
 
@@ -136,10 +140,11 @@ impl App {
 
     // ── Players ────────────────────────────────────────────────────────────
 
-    pub fn add_viewer(&self, home: bool) -> (u64, mpsc::UnboundedReceiver<Direct>) {
+    pub fn add_viewer(&self, home: bool, profile: Option<Profile>) -> (u64, mpsc::UnboundedReceiver<Direct>) {
         let id = self.next_viewer.fetch_add(1, Ordering::Relaxed);
         let (direct, rx) = mpsc::unbounded_channel();
-        self.inner.lock().unwrap().viewers.insert(id, Viewer { name: format!("Player {id}"), home, direct });
+        let name = profile.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Setup".to_owned());
+        self.inner.lock().unwrap().viewers.insert(id, Viewer { name, home, profile, direct });
         self.changed();
         (id, rx)
     }
@@ -166,14 +171,45 @@ impl App {
         self.changed();
     }
 
-    pub fn set_name(&self, id: u64, name: &str) {
-        let name: String = name.trim().chars().filter(|c| !c.is_control()).take(24).collect();
-        if name.is_empty() {
-            return;
+    /// The profile a player is logged in as, as it is stored now.
+    pub fn viewer_profile(&self, id: u64) -> Option<Profile> {
+        let profile_id = self.inner.lock().unwrap().viewers.get(&id)?.profile.as_ref()?.id.clone();
+        self.access.profile(&profile_id)
+    }
+
+    /// After profiles change: players pick up their new name and permissions,
+    /// and players whose profile is gone are logged out.
+    pub fn refresh_profiles(&self) {
+        let mut gone = Vec::new();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for (id, viewer) in inner.viewers.iter_mut() {
+                let Some(old) = &viewer.profile else { continue };
+                match self.access.profile(&old.id) {
+                    Some(fresh) => {
+                        viewer.name = fresh.name.clone();
+                        viewer.profile = Some(fresh);
+                    }
+                    None => gone.push(*id),
+                }
+            }
         }
-        if let Some(viewer) = self.inner.lock().unwrap().viewers.get_mut(&id) {
-            viewer.name = name;
+        for id in gone {
+            self.send_direct(id, Direct::LoggedOut);
         }
+        self.changed();
+    }
+
+    /// After the first (admin) profile is made: the setup connections become it.
+    pub fn adopt_first_profile(&self, profile: &Profile) {
+        let mut inner = self.inner.lock().unwrap();
+        for viewer in inner.viewers.values_mut() {
+            if viewer.profile.is_none() && viewer.home {
+                viewer.profile = Some(profile.clone());
+                viewer.name = profile.name.clone();
+            }
+        }
+        drop(inner);
         self.changed();
     }
 
@@ -198,6 +234,11 @@ impl App {
     pub async fn set_pad(&self, id: u64, local: u8, mut state: GamepadState) {
         let (slot, is_new) = {
             let mut inner = self.inner.lock().unwrap();
+            // Profiles without Xbox Home may not press the Xbox button.
+            let may_use_home = inner.viewers.get(&id).is_none_or(|v| v.profile.as_ref().is_none_or(|p| p.xbox_home));
+            if !may_use_home {
+                state.buttons &= !zeroplay_xbox::input::button::NEXUS;
+            }
             let existing = inner.slots.iter().position(|s| *s == Some((id, local)));
             match existing {
                 Some(slot) => (slot, false),
@@ -589,8 +630,10 @@ impl App {
                 "id": id,
                 "name": inner.viewers.get(&id).map(|v| v.name.clone()),
                 "home": inner.viewers.get(&id).is_some_and(|v| v.home),
+                "profile": inner.viewers.get(&id).and_then(|v| v.profile.as_ref()).map(Profile::public),
             },
-            "passwordSet": self.access.has_password(),
+            "setupDone": self.access.has_profiles(),
+            "admin": inner.viewers.get(&id).and_then(|v| v.profile.as_ref()).filter(|p| self.access.profile(&p.id).is_some_and(|p| p.admin)).map(|_| self.access.admin_view()),
             "playit": self.playit.status(),
         })
     }

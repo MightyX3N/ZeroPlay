@@ -21,13 +21,18 @@
     </div>
     <div class="topbar-right">
       <div id="players" class="players"></div>
+      <button id="btn-profiles" class="icon-btn hidden" aria-label="Profiles" title="Profiles">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17.5" cy="9" r="2.5"/><path d="M17 14.5a5 5 0 0 1 4.5 5"/></svg>
+        <span id="requests-badge" class="badge-dot hidden"></span>
+      </button>
       <button id="btn-remote" class="icon-btn" aria-label="Remote access (playit.gg)" title="Remote access (playit.gg)">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
       </button>
       <button id="btn-refresh" class="icon-btn" aria-label="Refresh consoles" title="Refresh consoles">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
       </button>
-      <button id="btn-signout" class="icon-btn" aria-label="Sign out of Microsoft" title="Sign out of Microsoft">
+      <button id="btn-logout" class="pill-btn" title="Log out">
+        <span id="me-name">—</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 17l-5-5 5-5M5 12h11"/></svg>
       </button>
     </div>
@@ -67,28 +72,71 @@
 
 <section id="login" class="screen center hidden">
   <form id="login-form" class="panel">
-    <h1>ZeroPlay</h1>
+    <h1 id="login-title">ZeroPlay</h1>
+    <p id="login-intro" class="muted hidden">Choose a name and password. You can log in once the admin approves your request.</p>
+    <label class="field">Name
+      <input id="login-name" autocomplete="username" maxlength="24" required>
+    </label>
     <label class="field">Password
       <input id="login-password" type="password" autocomplete="current-password" required>
     </label>
-    <button class="btn primary" type="submit">Log in</button>
+    <button id="login-submit" class="btn primary" type="submit">Log in</button>
+    <button id="login-switch" class="link-btn hidden" type="button">Request access</button>
     <p id="login-error" class="error hidden"></p>
+    <p id="login-done" class="hidden"></p>
   </form>
 </section>
 
-<section id="setpass" class="screen center hidden">
-  <form id="setpass-form" class="panel">
-    <h1>Choose a password</h1>
-    <p class="muted">Everyone uses this password to open ZeroPlay, at home and through remote access.</p>
+<section id="setup" class="screen center hidden">
+  <form id="setup-form" class="panel">
+    <h1>Create the admin profile</h1>
+    <p class="muted">You manage ZeroPlay with this profile: other profiles, access requests and remote access.</p>
+    <label class="field">Name
+      <input id="setup-name" autocomplete="username" maxlength="24" required>
+    </label>
     <label class="field">Password (at least 8 characters)
-      <input id="setpass-password" type="password" autocomplete="new-password" minlength="8" required>
+      <input id="setup-password" type="password" autocomplete="new-password" minlength="8" required>
     </label>
     <label class="field">Same password again
-      <input id="setpass-again" type="password" autocomplete="new-password" minlength="8" required>
+      <input id="setup-again" type="password" autocomplete="new-password" minlength="8" required>
     </label>
-    <button class="btn primary" type="submit">Save password</button>
-    <p id="setpass-error" class="error hidden"></p>
+    <button class="btn primary" type="submit">Create profile</button>
+    <p id="setup-error" class="error hidden"></p>
   </form>
+</section>
+
+<section id="profiles" class="screen overlay hidden">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h1>Profiles</h1>
+      <button id="btn-profiles-close" class="btn secondary">Close</button>
+    </div>
+
+    <label class="toggle-row">
+      <span><b>Allow access requests</b><br><span class="muted small">The login page gets a "Request access" button. You approve each request here.</span></span>
+      <input id="allow-requests" type="checkbox">
+    </label>
+
+    <div id="requests-box" class="hidden">
+      <h2>Waiting for approval</h2>
+      <div id="requests" class="list"></div>
+    </div>
+
+    <h2>Profiles</h2>
+    <div id="profile-list" class="list"></div>
+
+    <h2>Add a profile</h2>
+    <form id="add-profile" class="add-row">
+      <input id="add-name" placeholder="Name" maxlength="24" required aria-label="Name">
+      <input id="add-password" type="password" placeholder="Password (8+ characters)" minlength="8" required aria-label="Password" autocomplete="new-password">
+      <label class="check"><input id="add-admin" type="checkbox"> Admin</label>
+      <button class="btn primary" type="submit">Add</button>
+    </form>
+
+    <h2>Microsoft account</h2>
+    <p class="muted small">The Xbox sign-in this server uses for everyone.</p>
+    <div><button id="btn-ms-signout" class="btn secondary small" type="button">Sign this server out of Microsoft</button></div>
+  </div>
 </section>
 
 <section id="notsetup" class="screen center hidden">
@@ -136,7 +184,7 @@
       <p id="remote-waiting" class="muted small">Creating the tunnels…</p>
       <p id="remote-note" class="muted small hidden"></p>
     </div>
-    <p id="remote-away" class="muted small hidden">Remote access can only be changed from your home network.</p>
+    <p id="remote-away" class="muted small hidden">Remote access can only be changed by an admin on your home network.</p>
     <p id="remote-error" class="error hidden"></p>
     <div class="row">
       <button id="btn-playit-disconnect" class="btn secondary hidden">Unlink</button>
