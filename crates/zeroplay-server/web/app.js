@@ -1006,9 +1006,17 @@ function buttonValue(b) {
 
 function padState(gp) {
   let buttons = 0;
+  let lt = 0;
+  let rt = 0;
   const list = gp.buttons || [];
-  for (let i = 0; i < list.length && i < STANDARD.length; i++) {
-    if (STANDARD[i] && buttonDown(list[i])) buttons |= STANDARD[i];
+  // Each physical button does what it is bound to (by default the standard
+  // layout; extra buttons such as back paddles do nothing until bound).
+  for (let i = 0; i < list.length; i++) {
+    const target = targetOf(gp.id, i);
+    if (!target) continue;
+    if (target === "lt") lt = Math.max(lt, buttonValue(list[i]));
+    else if (target === "rt") rt = Math.max(rt, buttonValue(list[i]));
+    else if (buttonDown(list[i])) buttons |= BTN[target] || 0;
   }
   const axes = gp.axes || [];
   const axis = (i) => {
@@ -1018,9 +1026,262 @@ function padState(gp) {
   return {
     buttons,
     lx: axis(0), ly: -axis(1), rx: axis(2), ry: -axis(3),
-    lt: buttonValue(list[6]),
-    rt: buttonValue(list[7]),
+    lt,
+    rt,
   };
+}
+
+// ── Controls: button rebinding and gyro ─────────────────────────────────────
+// Saved per device (this browser), per controller model.
+
+const TARGETS = ["a", "b", "x", "y", "lb", "rb", "lt", "rt", "view", "menu", "ls", "rs", "up", "down", "left", "right", "nexus"];
+const TARGET_NAMES = {
+  a: "A", b: "B", x: "X", y: "Y", lb: "LB", rb: "RB", lt: "LT", rt: "RT", view: "View", menu: "Menu",
+  ls: "Left stick press", rs: "Right stick press", up: "D-pad up", down: "D-pad down", left: "D-pad left",
+  right: "D-pad right", nexus: "Xbox button",
+};
+
+function loadJson(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; }
+}
+
+let binds = loadJson("zp-binds", {}); // controller id → { physical index: target ("" = nothing) }
+
+function targetOf(padId, index) {
+  const own = binds[padId];
+  if (own && Object.prototype.hasOwnProperty.call(own, index)) return own[index];
+  return TARGETS[index] || "";
+}
+
+// What a physical button is called: by the standard layout, or "Extra button".
+function physicalName(index) {
+  return index < TARGETS.length ? TARGET_NAMES[TARGETS[index]] : `Extra button ${index - TARGETS.length + 1}`;
+}
+
+// Puts `target` on physical button `index`. If that button had a job, the
+// button that had `target` gets it (a swap), so nothing is lost; a button
+// without a job (an extra button such as a back paddle) simply copies
+// `target`, and the original button keeps it too.
+function bindButton(padId, target, index, count) {
+  const own = { ...(binds[padId] || {}) };
+  const old = targetOf(padId, index);
+  if (old) {
+    for (let i = 0; i < Math.max(count, TARGETS.length); i++) {
+      if (i !== index && targetOf(padId, i) === target) own[i] = old;
+    }
+  }
+  own[index] = target;
+  binds[padId] = own;
+  localStorage.setItem("zp-binds", JSON.stringify(binds));
+}
+
+function resetButtons(padId) {
+  delete binds[padId];
+  localStorage.setItem("zp-binds", JSON.stringify(binds));
+}
+
+let controlsOpen = false;
+let controlsIndex = 0;
+let controlsPad = null; // the chosen controller's id
+let capture = null; // { target, padId, baseline: Set, until }
+
+function openControls() {
+  if (menuOpen) closeMenu();
+  if (document.pointerLockElement) document.exitPointerLock();
+  releaseAll();
+  controlsOpen = true;
+  controlsIndex = 0;
+  renderControls();
+  show($("controls"), true);
+}
+
+function closeControls() {
+  controlsOpen = false;
+  capture = null;
+  show($("controls"), false);
+}
+
+function renderControls() {
+  if (!controlsOpen) return;
+  const pads = readPads();
+  if (!pads.find((p) => p.id === controlsPad)) controlsPad = pads[0] ? pads[0].id : null;
+  const pad = pads.find((p) => p.id === controlsPad);
+  const short = (id) => id.replace(/\s*\(.*$/, "").slice(0, 40) || "Controller";
+  $("controls-pads").replaceChildren(
+    pad
+      ? el("button", { className: "menu-item", textContent: `Controller: ${short(pad.id)}${pads.length > 1 ? "  ◀ ▶" : ""}`, onclick: () => {
+          const ids = [...new Set(pads.map((p) => p.id))];
+          controlsPad = ids[(ids.indexOf(controlsPad) + 1) % ids.length];
+          renderControls();
+        } })
+      : el("p", { className: "muted small", textContent: "Connect a controller and press a button on it to change its buttons." }));
+  const count = pad ? (pad.buttons || []).length : 0;
+  const physicalFor = (target) => {
+    const found = [];
+    for (let i = 0; i < Math.max(count, TARGETS.length); i++) if (targetOf(controlsPad, i) === target) found.push(physicalName(i));
+    return found.length ? found.join(", ") : "—";
+  };
+  $("controls-binds").replaceChildren(...(pad ? [
+    ...TARGETS.map((t) => {
+      const item = el("button", { className: "menu-item", onclick: () => startCapture(t) },
+        TARGET_NAMES[t], el("span", { className: "bind", textContent: physicalFor(t) }));
+      return item;
+    }),
+    el("button", { className: "menu-item", textContent: "Reset buttons to default", onclick: () => { resetButtons(controlsPad); renderControls(); } }),
+    el("p", { className: "muted small", textContent: "Pick an action, then press the button for it. Extra buttons, such as back paddles, can be picked too when the browser sees them." }),
+  ] : []));
+  $("g-on").textContent = `Gyro: ${gyro.on ? "on" : "off"}`;
+  $("g-stick").textContent = `Gyro moves: ${gyro.stick === "left" ? "left" : "right"} stick`;
+  $("g-sens").textContent = `Gyro sensitivity: ${gyro.sens}  ◀ ▶`;
+  $("g-invx").textContent = `Invert left/right: ${gyro.invX ? "on" : "off"}`;
+  $("g-invy").textContent = `Invert up/down: ${gyro.invY ? "on" : "off"}`;
+  $("g-hold").textContent = `Gyro only while LT is held: ${gyro.hold ? "on" : "off"}`;
+  show($("g-note"), !!gyroNote);
+  $("g-note").textContent = gyroNote;
+  show($("capture"), !!capture);
+  if (capture) $("capture").textContent = `Press the button for ${TARGET_NAMES[capture.target]}… (Esc cancels)`;
+  const items = controlsItems();
+  if (controlsIndex >= items.length) controlsIndex = items.length - 1;
+  items.forEach((item, i) => item.classList.toggle("active", i === controlsIndex));
+  if (items[controlsIndex]) items[controlsIndex].scrollIntoView({ block: "nearest" });
+}
+
+function controlsItems() {
+  return [...document.querySelectorAll("#controls .menu-item")].filter((el) => !el.classList.contains("hidden"));
+}
+
+function rawPressed(pad) {
+  const down = new Set();
+  (pad.buttons || []).forEach((b, i) => { if (buttonDown(b)) down.add(i); });
+  return down;
+}
+
+function startCapture(target) {
+  const pad = readPads().find((p) => p.id === controlsPad);
+  if (!pad) return;
+  capture = { target, padId: controlsPad, baseline: rawPressed(pad), until: performance.now() + 6000 };
+  renderControls();
+}
+
+// Waits for a button that was not already held when picking started.
+function runCapture() {
+  const pad = readPads().find((p) => p.id === capture.padId);
+  if (!pad || performance.now() > capture.until) { capture = null; renderControls(); return; }
+  const down = rawPressed(pad);
+  for (const i of [...capture.baseline]) if (!down.has(i)) capture.baseline.delete(i);
+  for (const i of down) {
+    if (!capture.baseline.has(i)) {
+      bindButton(capture.padId, capture.target, i, (pad.buttons || []).length);
+      capture = null;
+      // Do not let this press also click the item under the cursor.
+      prevButtons.set(pad.index, 0xffff);
+      renderControls();
+      return;
+    }
+  }
+}
+
+$("btn-controls").onclick = openControls;
+// Controllers plugged in or out while the panel is open.
+setInterval(() => { if (controlsOpen && !capture) renderControls(); }, 1000);
+window.addEventListener("keydown", (event) => {
+  if (!controlsOpen || event.code !== "Escape") return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (capture) { capture = null; renderControls(); } else closeControls();
+}, true);
+$("m-controls").onclick = openControls;
+$("c-close").onclick = closeControls;
+
+// Gyro: this device's motion sensor (a phone or tablet held with a clip-on
+// controller) moves a stick. Controllers' own gyros are not readable by
+// browsers' controller support.
+let gyro = { on: false, stick: "right", sens: 1, invX: false, invY: false, hold: false, ...loadJson("zp-gyro", {}) };
+let gyroNote = "";
+let motion = null; // { yaw, pitch, at }
+const saveGyro = () => localStorage.setItem("zp-gyro", JSON.stringify(gyro));
+const GYRO_SENS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+
+window.addEventListener("devicemotion", (event) => {
+  const r = event.rotationRate;
+  if (!r || (r.alpha == null && r.beta == null && r.gamma == null)) return;
+  const beta = r.beta || 0;
+  const gamma = r.gamma || 0;
+  // Turning and tilting as seen on the screen, whichever way the device is held.
+  const angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  let yaw;
+  let pitch;
+  switch ((angle + 360) % 360) {
+    case 90: yaw = beta; pitch = -gamma; break;
+    case 270: yaw = -beta; pitch = gamma; break;
+    case 180: yaw = -gamma; pitch = -beta; break;
+    default: yaw = gamma; pitch = beta;
+  }
+  motion = { yaw, pitch, at: performance.now() };
+  if (gyroNote) { gyroNote = ""; renderControls(); }
+});
+
+async function setGyro(on) {
+  if (on && typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+    try {
+      if ((await DeviceMotionEvent.requestPermission()) !== "granted") {
+        gyroNote = "Motion access was not allowed.";
+        on = false;
+      }
+    } catch {
+      gyroNote = "This browser only allows motion access on an https address.";
+      on = false;
+    }
+  }
+  gyro.on = on;
+  saveGyro();
+  if (on) {
+    setTimeout(() => {
+      if (gyro.on && (!motion || performance.now() - motion.at > 1500)) {
+        gyroNote = window.isSecureContext ? "No motion sensor found on this device." : "No motion data: this browser may only give it on an https address.";
+        renderControls();
+      }
+    }, 1500);
+  } else {
+    gyroNote = "";
+  }
+  renderControls();
+}
+
+function changeGyroSens(step) {
+  const i = GYRO_SENS.indexOf(gyro.sens);
+  gyro.sens = GYRO_SENS[Math.max(0, Math.min(GYRO_SENS.length - 1, (i < 0 ? 3 : i) + step))];
+  saveGyro();
+  renderControls();
+}
+
+$("g-on").onclick = () => setGyro(!gyro.on);
+$("g-stick").onclick = () => { gyro.stick = gyro.stick === "left" ? "right" : "left"; saveGyro(); renderControls(); };
+$("g-sens").onclick = () => changeGyroSens(GYRO_SENS.indexOf(gyro.sens) >= GYRO_SENS.length - 1 ? -(GYRO_SENS.length - 1) : 1);
+$("g-invx").onclick = () => { gyro.invX = !gyro.invX; saveGyro(); renderControls(); };
+$("g-invy").onclick = () => { gyro.invY = !gyro.invY; saveGyro(); renderControls(); };
+$("g-hold").onclick = () => { gyro.hold = !gyro.hold; saveGyro(); renderControls(); };
+
+// The stick movement from the gyro right now ([0, 0] when off).
+function gyroStick(ltHeld) {
+  if (!gyro.on || !motion || performance.now() - motion.at > 250) return [0, 0];
+  if (gyro.hold && !ltHeld) return [0, 0];
+  const dead = (v) => (Math.abs(v) < 1.5 ? 0 : v);
+  const x = (dead(motion.yaw) * gyro.sens / 120) * (gyro.invX ? 1 : -1);
+  const y = (dead(motion.pitch) * gyro.sens / 120) * (gyro.invY ? -1 : 1);
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  return [clamp(x), clamp(y)];
+}
+
+// Adds the gyro to a controller state's chosen stick.
+function addGyro(state) {
+  const [gx, gy] = gyroStick(state.lt > 0.3);
+  if (!gx && !gy) return state;
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  const out = { ...state };
+  if (gyro.stick === "left") { out.lx = clamp(out.lx + gx); out.ly = clamp(out.ly + gy); }
+  else { out.rx = clamp(out.rx + gx); out.ry = clamp(out.ry + gy); }
+  return out;
 }
 
 // Controllers the page was told about, for browsers whose getGamepads() list
@@ -1076,6 +1337,21 @@ function pressed(local, bits, bit) {
 
 function navigate(bits, local) {
   const onHome = !$("home").classList.contains("hidden");
+  if (controlsOpen) {
+    if (capture) return;
+    const items = controlsItems();
+    if (!items.length) return;
+    if (pressed(local, bits, BTN.down)) controlsIndex = (controlsIndex + 1) % items.length;
+    if (pressed(local, bits, BTN.up)) controlsIndex = (controlsIndex + items.length - 1) % items.length;
+    if (pressed(local, bits, BTN.a)) items[controlsIndex].click();
+    if (items[controlsIndex] && items[controlsIndex].id === "g-sens") {
+      if (pressed(local, bits, BTN.right)) changeGyroSens(1);
+      if (pressed(local, bits, BTN.left)) changeGyroSens(-1);
+    }
+    if (pressed(local, bits, BTN.b)) closeControls();
+    renderControls();
+    return;
+  }
   if (menuOpen) {
     const items = menuItems().filter((el) => !el.classList.contains("hidden"));
     if (pressed(local, bits, BTN.down)) menuIndex = (menuIndex + 1) % items.length;
@@ -1133,8 +1409,9 @@ function combine(states) {
 let mergedWasActive = false;
 
 function pollPads() {
+  if (capture) runCapture();
   const inStream = watching() && !$("stream").classList.contains("hidden");
-  const playing = inStream && !menuOpen;
+  const playing = inStream && !menuOpen && !controlsOpen;
   const states = new Map(); // local index → state, for this tick
   let combo = false;
   for (const gp of readPads()) {
@@ -1147,6 +1424,17 @@ function pollPads() {
   updateMouseStick();
   const kbActive = playing && keyboardOn && (keysDown.size > 0 || mouseLocked());
   if (kbActive) states.set(KEYBOARD_LOCAL, keyboardState());
+
+  // The gyro goes onto the first controller (or the merged one).
+  if (playing && gyro.on) {
+    const first = separatePlayers ? (states.keys().next().value ?? KEYBOARD_LOCAL) : null;
+    if (separatePlayers) states.set(first, addGyro(states.get(first) || neutral()));
+    else if (states.size || (motion && performance.now() - motion.at < 250)) {
+      const merged = addGyro(states.size ? combine([...states.values()]) : neutral());
+      states.clear();
+      states.set(MERGED_LOCAL, merged);
+    }
+  }
 
   if (separatePlayers) {
     for (const [local, state] of states) sendPad(local, state);
