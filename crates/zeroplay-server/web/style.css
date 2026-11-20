@@ -72,6 +72,10 @@ svg.fill { fill: currentColor; stroke: none; }
 .tile.selected::after { content: ""; position: absolute; inset: -6px; border: 3px solid #fff; border-radius: 14px; }
 .tile .label { padding: 10px; background: rgba(0,0,0,.55); border-radius: 0 0 10px 10px; font-size: 13px; }
 .tile .label b { display: block; font-size: 14px; }
+.tile.game { width: 140px; height: 210px; background-size: cover; background-position: center; }
+.tile.game .label { font-size: 13px; }
+.hero-art { background-size: cover; background-position: center; }
+.game-checks { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow: auto; padding: 4px 0; }
 .hints { display: flex; gap: 22px; flex-wrap: wrap; margin-top: auto; }
 .hints span { display: flex; align-items: center; gap: 6px; }
 .glyph { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--muted); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }

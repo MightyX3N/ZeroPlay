@@ -99,6 +99,29 @@ struct Inner {
     watchers: HashSet<u64>,
     /// The quality the running stream was started with.
     stream_quality: Option<Quality>,
+    /// Installed games per console, and when they were read.
+    games: HashMap<String, (Instant, Vec<Game>)>,
+}
+
+/// A game installed on a console.
+#[derive(Clone, Debug)]
+pub struct Game {
+    /// The Store id, used to launch it.
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
+}
+
+/// Whether a profile may launch this game (no profile = first setup at home).
+fn may_play(profile: Option<&Profile>, game: &str) -> bool {
+    match profile {
+        None => true,
+        Some(p) if p.admin => true,
+        Some(p) => p
+            .games
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|g| g == game)),
+    }
 }
 
 pub struct App {
@@ -154,6 +177,7 @@ impl App {
                 last_keyframe: None,
                 watchers: HashSet::new(),
                 stream_quality: None,
+                games: HashMap::new(),
             }),
             session: Mutex::new(None),
             generation: AtomicU64::new(0),
@@ -680,6 +704,130 @@ impl App {
             }
         }
         self.changed();
+        let awake: Vec<String> = self
+            .inner
+            .lock()
+            .unwrap()
+            .consoles
+            .iter()
+            .filter(|c| c.power_state == "On" || c.power_state == "ConnectedStandby")
+            .map(|c| c.id.clone())
+            .collect();
+        for console in awake {
+            self.refresh_games(&console, false).await;
+        }
+    }
+
+    // ── Game library ───────────────────────────────────────────────────────
+
+    /// Reads the games installed on a console (at most once a minute unless
+    /// `force`), with cover art where Xbox Live has it.
+    pub async fn refresh_games(&self, console_id: &str, force: bool) {
+        let fresh = self
+            .inner
+            .lock()
+            .unwrap()
+            .games
+            .get(console_id)
+            .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(60));
+        if fresh && !force {
+            return;
+        }
+        let result = async {
+            let token = self.auth.lock().await.web_token().await?;
+            let mut apps = consoles::installed_apps(&self.http, &token, console_id).await?;
+            apps.retain(|a| a.is_game && a.one_store_product_id.is_some());
+            // Most recently played first.
+            apps.sort_by(|a, b| b.last_active_time.cmp(&a.last_active_time));
+            apps.dedup_by(|a, b| a.one_store_product_id == b.one_store_product_id);
+            let ids: Vec<u64> = apps
+                .iter()
+                .map(|a| a.title_id)
+                .filter(|id| *id != 0)
+                .collect();
+            let art = match consoles::title_art(&self.http, &token, &ids).await {
+                Ok(art) => art,
+                Err(error) => {
+                    println!("[games] no cover art: {error:#}");
+                    Default::default()
+                }
+            };
+            anyhow::Ok(
+                apps.into_iter()
+                    .map(|a| Game {
+                        id: a.one_store_product_id.unwrap_or_default(),
+                        name: a.name.unwrap_or_else(|| "Game".to_owned()),
+                        image: art.get(&a.title_id).cloned(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
+        .await;
+        match result {
+            Ok(games) => {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .games
+                    .insert(console_id.to_owned(), (Instant::now(), games));
+                self.changed();
+            }
+            Err(error) => println!("[games] could not read the games on {console_id}: {error:#}"),
+        }
+    }
+
+    /// Starts a game: wakes the console, launches the game, and starts the
+    /// stream if it is not running yet.
+    pub fn launch(self: &Arc<Self>, viewer: u64, console_id: &str, game: &str) -> Result<()> {
+        let profile = self.viewer_profile(viewer);
+        if !may_play(profile.as_ref(), game) {
+            bail!("Your profile may not play this game.");
+        }
+        let app = self.clone();
+        let console = console_id.to_owned();
+        let console_id = console.clone();
+        let game = game.to_owned();
+        tokio::spawn(async move {
+            let _ = app.wake(&console_id).await;
+            let mut last_error = None;
+            // A console just woken from standby needs a moment before it takes commands.
+            for attempt in 0..6 {
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                let result = async {
+                    let token = app.auth.lock().await.web_token().await?;
+                    consoles::launch(&app.http, &token, &console_id, &game).await
+                }
+                .await;
+                match result {
+                    Ok(()) => {
+                        println!("[games] launched {game}");
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            if let Some(error) = last_error {
+                app.send_direct(
+                    viewer,
+                    Direct::Error {
+                        message: format!("Could not start the game: {error:#}"),
+                    },
+                );
+            }
+        });
+        let running = matches!(
+            self.inner.lock().unwrap().stream,
+            StreamState::Starting { .. }
+                | StreamState::Live { .. }
+                | StreamState::Reconnecting { .. }
+        );
+        if !running {
+            self.start(&console)?;
+        }
+        Ok(())
     }
 
     pub async fn wake(&self, console_id: &str) -> Result<()> {
@@ -1073,6 +1221,35 @@ impl App {
             "queue": queue.len(),
             "askedForTime": inner.seats.time_requests.iter().any(|r| r.viewer == id),
         });
+        let viewer_profile = inner
+            .viewers
+            .get(&id)
+            .and_then(|v| v.profile.as_ref())
+            .and_then(|p| self.access.profile(&p.id));
+        let games: serde_json::Map<String, Value> = inner
+            .games
+            .iter()
+            .map(|(console, (_, games))| {
+                let list: Vec<Value> = games
+                    .iter()
+                    .filter(|g| may_play(viewer_profile.as_ref(), &g.id))
+                    .map(|g| json!({ "id": g.id, "name": g.name, "image": g.image }))
+                    .collect();
+                (console.clone(), Value::from(list))
+            })
+            .collect();
+        let all_games = admin.is_some().then(|| {
+            let mut all: Vec<(String, String)> = inner
+                .games
+                .values()
+                .flat_map(|(_, g)| g.iter().map(|g| (g.id.clone(), g.name.clone())))
+                .collect();
+            all.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+            all.dedup_by(|a, b| a.0 == b.0);
+            all.into_iter()
+                .map(|(id, name)| json!({ "id": id, "name": name }))
+                .collect::<Vec<_>>()
+        });
         json!({
             "t": "status",
             "signedIn": inner.signed_in,
@@ -1090,6 +1267,9 @@ impl App {
                 "profile": inner.viewers.get(&id).and_then(|v| v.profile.as_ref()).map(Profile::public),
             },
             "setupDone": self.access.has_profiles(),
+            "games": games,
+            // Every game on every console, for the admin's profile editor.
+            "allGames": all_games,
             "admin": admin,
             "turns": turns,
             "quality": {

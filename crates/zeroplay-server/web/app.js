@@ -192,10 +192,21 @@ function profileEditor(p, isMe) {
   const password = el("input", { type: "password", placeholder: "New password (leave empty to keep)", minLength: 8, autocomplete: "new-password", ariaLabel: "New password" });
   const admin = el("input", { type: "checkbox", checked: p.admin });
   const home = el("input", { type: "checkbox", checked: p.xboxHome });
+  // Games: all, or a chosen list.
+  const allGames = (status && status.allGames) || [];
+  const everyGame = el("input", { type: "checkbox", checked: !p.games });
+  const gameBoxes = allGames.map((g) => ({ id: g.id, box: el("input", { type: "checkbox", checked: !!(p.games && p.games.includes(g.id)) }), name: g.name }));
+  const gameList = el("div", { className: "game-checks" },
+    ...(allGames.length
+      ? gameBoxes.map((g) => el("label", { className: "check" }, g.box, g.name))
+      : [el("p", { className: "muted small", textContent: "No games found yet. They show up once a console is on or in standby." })]));
+  show(gameList, !everyGame.checked);
+  everyGame.onchange = () => show(gameList, !everyGame.checked);
   const quality = el("select", { ariaLabel: "Highest quality" },
     ...["max", "high", "medium", "low"].map((q) => el("option", { value: q, textContent: q[0].toUpperCase() + q.slice(1), selected: p.maxQuality === q })));
   const save = el("button", { className: "btn primary small", textContent: "Save", onclick: () => {
-    const changes = { name: name.value, admin: admin.checked, xboxHome: home.checked, maxQuality: quality.value };
+    const changes = { name: name.value, admin: admin.checked, xboxHome: home.checked, maxQuality: quality.value,
+      games: everyGame.checked ? null : gameBoxes.filter((g) => g.box.checked).map((g) => g.id) };
     if (password.value) changes.password = password.value;
     send({ t: "adminUpdate", id: p.id, changes });
     editing = null;
@@ -209,7 +220,8 @@ function profileEditor(p, isMe) {
     el("label", { className: "check" }, admin, "Admin (manages profiles and remote access)"),
     el("label", { className: "check" }, home, "May open Xbox Home and press the Xbox button"),
     el("label", { className: "field" }, "Highest stream quality", quality),
-    el("p", { className: "muted small full", textContent: "Which games this profile may play is set here once the game library is added." }),
+    el("label", { className: "check full" }, everyGame, "May play every game"),
+    el("div", { className: "full" }, gameList),
     el("div", { className: "item-actions full" }, save, isMe ? null : remove));
 }
 
@@ -436,10 +448,54 @@ function renderHome(s) {
     tile.onclick = () => { selected = c.id; renderHome(status); };
     return tile;
   }));
-  const chosen = document.querySelector(".tile.selected");
+  renderGames(s, current);
+  const chosen = document.querySelector(homeRow === "games" ? "#game-tiles .tile.selected" : "#tiles .tile.selected");
   if (chosen) chosen.scrollIntoView({ block: "nearest", inline: "nearest" });
 
   renderPlayers(s);
+}
+
+// ── Game library ─────────────────────────────────────────────────────────────
+// The games installed on the chosen console (only those this profile may
+// play). Picking one starts it on the Xbox and joins the stream.
+
+let homeRow = "consoles"; // which row the controller moves in: "games" or "consoles"
+let selectedGame = null;
+
+function gamesOf(s, consoleId) {
+  return ((s.games || {})[consoleId]) || [];
+}
+
+function renderGames(s, current) {
+  const games = current ? gamesOf(s, current.id) : [];
+  show($("games-shelf"), games.length > 0);
+  if (!games.find((g) => g.id === selectedGame)) selectedGame = games[0] ? games[0].id : null;
+  if (!games.length && homeRow === "games") homeRow = "consoles";
+  $("games-title").textContent = current ? `Games on ${current.name}` : "Games";
+  $("games-count").textContent = `${games.length} game${games.length === 1 ? "" : "s"}`;
+  $("game-tiles").replaceChildren(...games.map((g) => {
+    const tile = document.createElement("button");
+    tile.className = "tile game" + (homeRow === "games" && g.id === selectedGame ? " selected" : "");
+    tile.setAttribute("aria-label", `Play ${g.name}`);
+    if (g.image) tile.style.backgroundImage = `url("${g.image}")`;
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = g.name;
+    tile.append(label);
+    tile.onclick = () => { selectedGame = g.id; homeRow = "games"; launchGame(g); };
+    return tile;
+  }));
+  document.querySelectorAll("#tiles .tile").forEach((t) => { if (homeRow === "games") t.classList.remove("selected"); });
+  const shown = homeRow === "games" ? games.find((g) => g.id === selectedGame) : games[0];
+  $("hero-art").style.backgroundImage = shown && shown.image ? `url("${shown.image}")` : "";
+}
+
+function launchGame(g) {
+  if (!status || !selected) return;
+  wantWatch = true;
+  send({ t: "launch", console: selected, game: g.id });
+  toast(`Starting ${g.name}…`, true);
+  if (status.stream.state === "live") onStatus(status);
 }
 
 function renderPlayers(s) {
@@ -1029,11 +1085,22 @@ function navigate(bits, local) {
     if (pressed(local, bits, BTN.b)) closeMenu();
     if (menuOpen) renderMenu();
   } else if (onHome && status) {
-    const ids = (status.consoles || []).map((c) => c.id);
-    const i = ids.indexOf(selected);
-    if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selected = ids[i + 1]; renderHome(status); }
-    if (pressed(local, bits, BTN.left) && i > 0) { selected = ids[i - 1]; renderHome(status); }
-    if (pressed(local, bits, BTN.a)) play();
+    const games = gamesOf(status, selected);
+    if (pressed(local, bits, BTN.up) && games.length) { homeRow = "games"; renderHome(status); }
+    if (pressed(local, bits, BTN.down)) { homeRow = "consoles"; renderHome(status); }
+    if (homeRow === "games") {
+      const ids = games.map((g) => g.id);
+      const i = ids.indexOf(selectedGame);
+      if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selectedGame = ids[i + 1]; renderHome(status); }
+      if (pressed(local, bits, BTN.left) && i > 0) { selectedGame = ids[i - 1]; renderHome(status); }
+      if (pressed(local, bits, BTN.a)) { const g = games.find((x) => x.id === selectedGame); if (g) launchGame(g); }
+    } else {
+      const ids = (status.consoles || []).map((c) => c.id);
+      const i = ids.indexOf(selected);
+      if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selected = ids[i + 1]; renderHome(status); }
+      if (pressed(local, bits, BTN.left) && i > 0) { selected = ids[i - 1]; renderHome(status); }
+      if (pressed(local, bits, BTN.a)) play();
+    }
   }
 }
 

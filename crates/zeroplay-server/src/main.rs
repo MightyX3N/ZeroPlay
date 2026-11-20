@@ -321,6 +321,11 @@ enum FromPage {
         on: bool,
     },
     RequestTime,
+    /// Start a game (and the stream).
+    Launch {
+        console: String,
+        game: String,
+    },
     /// The shared stream quality.
     Quality {
         quality: access::Quality,
@@ -559,6 +564,11 @@ async fn handle(
         FromPage::Turns { on } => app.set_turns(id, on),
         FromPage::RequestTime => return app.request_time(id),
         FromPage::Quality { quality } => return app.set_quality(id, quality).await,
+        FromPage::Launch { console, game } => {
+            if let Err(e) = app.launch(id, &console, &game) {
+                return error(format!("{e:#}"));
+            }
+        }
         FromPage::PlayitConnect => app.playit.connect(),
         FromPage::PlayitDisconnect => app.playit.disconnect().await,
     }
