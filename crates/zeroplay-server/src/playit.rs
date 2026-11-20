@@ -247,6 +247,7 @@ impl Playit {
             ApiResult::Success(data) => data,
             other => bail!("playit.gg would not list the tunnels: {}", describe(&other)),
         };
+        let premium = data.pointer("/permissions/has_premium").and_then(Value::as_bool).unwrap_or(false);
         let agent_id = data.get("agent_id").and_then(Value::as_str).ok_or_else(|| anyhow!("playit.gg sent no agent id"))?.to_owned();
         let listed = |key: &str| -> Vec<Value> { data.get(key).and_then(Value::as_array).cloned().unwrap_or_default() };
         let tunnels = listed("tunnels");
@@ -279,7 +280,7 @@ impl Playit {
         let mut notes: Vec<String> = Vec::new();
         if find(WEB_TUNNEL).is_none() && !is_pending(WEB_TUNNEL) && !tried.contains(&WEB_TUNNEL) {
             tried.push(WEB_TUNNEL);
-            if let Err(error) = self.create_web_tunnel(&agent_id).await {
+            if let Err(error) = self.create_web_tunnel(&agent_id, premium).await {
                 if read_only(&error) {
                     tried.clear();
                     return Ok(false);
@@ -331,14 +332,16 @@ impl Playit {
 
     /// Creates a tunnel to this agent, with the request body playit.gg's own
     /// website sends (the same one Korie uses).
-    async fn create_tunnel(&self, agent_id: &str, name: &str, protocol: Value, fields: Value) -> Result<()> {
-        let body = json!({
+    async fn create_tunnel(&self, agent_id: &str, name: &str, protocol: Value, fields: Value, region: bool) -> Result<()> {
+        let mut body = json!({
             "name": name,
             "protocol": protocol,
             "origin": { "type": "agent", "data": { "agent_id": agent_id, "config": { "fields": fields } } },
-            "endpoint": { "type": "region", "details": { "region": "global", "port": null } },
             "enabled": true,
         });
+        if region {
+            body["endpoint"] = json!({ "type": "region", "details": { "region": "global", "port": null } });
+        }
         match self.call_as_agent("/v1/tunnels/create", body).await? {
             ApiResult::Success(_) => {
                 println!("[playit] created tunnel \"{name}\"");
@@ -348,22 +351,46 @@ impl Playit {
         }
     }
 
-    /// The page: an HTTPS tunnel (free; playit holds the certificate and passes
-    /// plain HTTP on to the remote port).
-    async fn create_web_tunnel(&self, agent_id: &str) -> Result<()> {
+    /// The page. With playit Premium a raw TCP port (plain http://address:port);
+    /// without it an HTTPS tunnel (free, certificate by playit). Each falls back
+    /// to the other if playit refuses it.
+    async fn create_web_tunnel(&self, agent_id: &str, premium: bool) -> Result<()> {
         let port = self.web_port.to_string();
-        self.create_tunnel(
-            agent_id,
-            WEB_TUNNEL,
-            json!({ "type": "tunnel-type", "details": "https" }),
-            json!([
-                { "name": "local_ip", "value": "127.0.0.1" },
-                { "name": "http_port", "value": port },
-                { "name": "https_port", "value": port },
-                { "name": "tls_termination", "value": "letsencrypt" },
-            ]),
-        )
-        .await
+        let raw_tcp = || {
+            (
+                json!({ "type": "raw-ports", "details": { "port_type": "tcp", "port_count": 1, "software_description": "ZeroPlay game streaming (web page)" } }),
+                json!([{ "name": "local_ip", "value": "127.0.0.1" }, { "name": "local_port", "value": port }]),
+                true,
+            )
+        };
+        let https = |region: bool| {
+            (
+                json!({ "type": "tunnel-type", "details": "https" }),
+                json!([
+                    { "name": "local_ip", "value": "127.0.0.1" },
+                    { "name": "http_port", "value": port },
+                    { "name": "https_port", "value": port },
+                    { "name": "tls_termination", "value": "letsencrypt" },
+                ]),
+                region,
+            )
+        };
+        let tries = if premium { vec![raw_tcp(), https(true), https(false)] } else { vec![https(true), https(false), raw_tcp()] };
+        let mut errors = Vec::new();
+        for (protocol, fields, region) in tries {
+            match self.create_tunnel(agent_id, WEB_TUNNEL, protocol, fields, region).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    println!("[playit] page tunnel attempt refused: {error:#}");
+                    if error.to_string().contains("NotAllowedWithReadOnly") {
+                        return Err(error);
+                    }
+                    errors.push(format!("{error:#}"));
+                }
+            }
+        }
+        errors.dedup();
+        bail!("{}", errors.join("; "))
     }
 
     /// The video: raw UDP ports to the media ports.
@@ -377,6 +404,7 @@ impl Playit {
                 { "name": "local_ip", "value": lan_ip() },
                 { "name": "local_port", "value": first.to_string() },
             ]),
+            true,
         )
         .await
     }
