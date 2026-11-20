@@ -547,12 +547,22 @@ impl Playit {
                     .unwrap_or(a)
                     .to_ascii_lowercase()
             });
+        let web_id = web_tunnel
+            .as_ref()
+            .and_then(|t| t.get("id").and_then(Value::as_str))
+            .map(str::to_owned);
         let on_plain = || {
             domains.iter().find(|d| {
-                d.get("name")
+                let targets_plain = d
+                    .pointer("/target/details/tunnel_id")
                     .and_then(Value::as_str)
-                    .map(str::to_ascii_lowercase)
-                    == web_host
+                    == web_id.as_deref()
+                    && web_id.is_some();
+                targets_plain
+                    || d.get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_ascii_lowercase)
+                        == web_host
             })
         };
         let pick = match (pick, web_tunnel.as_ref(), on_plain()) {
@@ -590,6 +600,11 @@ impl Playit {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        let sub_id = domain
+            .get("sub_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let name = domain
             .get("name")
             .and_then(Value::as_str)
@@ -608,24 +623,37 @@ impl Playit {
             { "name": "https_port", "value": port },
             { "name": "tls_termination", "value": "letsencrypt" },
         ]);
-        // playit's request for a tunnel on a domain: tried in the shapes its
-        // website and its client code use.
-        let shapes = [
+        // The request playit's own agent code describes for a tunnel on a domain
+        // (`ports` plus a `hostname` allocation), with the domain's id or sub id;
+        // then the shape playit's website sends. The agent (playitd 2.0.2) gets
+        // the Let's Encrypt certificate itself because of `tls_termination`.
+        let origin = json!({ "type": "agent", "data": { "agent_id": agent_id, "config": { "fields": fields } } });
+        let mut bodies = Vec::new();
+        for hostname_id in [&id, &sub_id] {
+            if hostname_id.is_empty() {
+                continue;
+            }
+            bodies.push(json!({
+                "name": HTTPS_TUNNEL,
+                "ports": protocol,
+                "origin": origin,
+                "enabled": true,
+                "alloc": { "type": "hostname", "details": { "hostname_id": hostname_id } },
+                "firewall_id": null,
+            }));
+        }
+        for extra in [
             json!({ "endpoint": { "type": "hostname", "details": { "hostname_id": id } } }),
             json!({ "endpoint": { "type": "domain", "details": { "domain_id": id } } }),
-            json!({ "alloc": { "type": "hostname", "details": { "hostname_id": id } } }),
-        ];
-        let mut errors = Vec::new();
-        for extra in shapes {
-            let mut body = json!({
-                "name": HTTPS_TUNNEL,
-                "protocol": protocol,
-                "origin": { "type": "agent", "data": { "agent_id": agent_id, "config": { "fields": fields } } },
-                "enabled": true,
-            });
+        ] {
+            let mut body = json!({ "name": HTTPS_TUNNEL, "protocol": protocol, "origin": origin, "enabled": true });
             for (key, value) in extra.as_object().unwrap() {
                 body[key] = value.clone();
             }
+            bodies.push(body);
+        }
+        let mut errors = Vec::new();
+        for body in bodies {
             match self.call_as_agent("/v1/tunnels/create", body).await? {
                 ApiResult::Success(_) => {
                     println!("[playit] created the https tunnel on {name}");
