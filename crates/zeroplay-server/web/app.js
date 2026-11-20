@@ -827,22 +827,65 @@ const sent = new Map(); // local index → { key, at }
 let comboSince = 0;
 let prevButtons = new Map(); // local index → bits, for menu and home navigation
 
+// ── Reading controllers ─────────────────────────────────────────────────────
+// Every controller is read with the standard layout (A B X Y, bumpers,
+// triggers, View, Menu, sticks, d-pad, Xbox button), whatever layout name the
+// browser reports for it: browsers often report none even for ordinary
+// controllers, and ignoring the buttons then made the controller do nothing.
+
+function buttonDown(b) {
+  if (!b) return false;
+  if (typeof b === "number") return b > 0.5;
+  return !!b.pressed || (typeof b.value === "number" && b.value > 0.5);
+}
+
+function buttonValue(b) {
+  if (!b) return 0;
+  if (typeof b === "number") return Math.max(0, Math.min(1, b));
+  if (typeof b.value === "number" && b.value > 0) return Math.min(1, b.value);
+  return b.pressed ? 1 : 0;
+}
+
 function padState(gp) {
   let buttons = 0;
-  const standard = gp.mapping === "standard";
-  gp.buttons.forEach((b, i) => {
-    if (b.pressed && standard && STANDARD[i]) buttons |= STANDARD[i];
-  });
+  const list = gp.buttons || [];
+  for (let i = 0; i < list.length && i < STANDARD.length; i++) {
+    if (STANDARD[i] && buttonDown(list[i])) buttons |= STANDARD[i];
+  }
+  const axes = gp.axes || [];
   const axis = (i) => {
-    const v = gp.axes[i] || 0;
-    return Math.abs(v) < 0.08 ? 0 : v;
+    const v = Number(axes[i]) || 0;
+    return Math.abs(v) < 0.08 ? 0 : Math.max(-1, Math.min(1, v));
   };
   return {
     buttons,
     lx: axis(0), ly: -axis(1), rx: axis(2), ry: -axis(3),
-    lt: gp.buttons[6] ? gp.buttons[6].value : 0,
-    rt: gp.buttons[7] ? gp.buttons[7].value : 0,
+    lt: buttonValue(list[6]),
+    rt: buttonValue(list[7]),
   };
+}
+
+// Controllers the page was told about, for browsers whose getGamepads() list
+// stays empty or out of date.
+const knownPads = new Map();
+window.addEventListener("gamepadconnected", (e) => { if (e.gamepad) knownPads.set(e.gamepad.index, e.gamepad); });
+window.addEventListener("gamepaddisconnected", (e) => { if (e.gamepad) knownPads.delete(e.gamepad.index); });
+
+function readPads() {
+  const pads = new Map();
+  let list = [];
+  try {
+    list = navigator.getGamepads ? navigator.getGamepads() || [] : [];
+  } catch {
+    list = [];
+  }
+  for (const gp of list) {
+    if (gp && gp.connected !== false) pads.set(gp.index, gp);
+  }
+  for (const [index, gp] of knownPads) {
+    if (!pads.has(index) && gp.connected !== false) pads.set(index, gp);
+  }
+  return [...pads.values()];
 }
 
 function sendPad(local, state) {
@@ -925,8 +968,7 @@ function pollPads() {
   const playing = inStream && !menuOpen;
   const states = new Map(); // local index → state, for this tick
   let combo = false;
-  for (const gp of navigator.getGamepads ? navigator.getGamepads() : []) {
-    if (!gp || !gp.connected) continue;
+  for (const gp of readPads()) {
     const state = padState(gp);
     if ((state.buttons & BTN.view) && (state.buttons & BTN.menu)) combo = true;
     if (playing) states.set(gp.index, state);
@@ -968,7 +1010,21 @@ function pollPads() {
   }
   show($("mouse-hint"), playing && keyboardOn && hasMouse && !mouseLocked());
 }
-setInterval(pollPads, 8);
+// Read the controllers every frame, like games do, with a timer as a backup
+// for when the browser slows frames down.
+let lastPoll = 0;
+function pollTick() {
+  const now = performance.now();
+  if (now - lastPoll < 4) return;
+  lastPoll = now;
+  pollPads();
+}
+function pollFrame() {
+  pollTick();
+  requestAnimationFrame(pollFrame);
+}
+requestAnimationFrame(pollFrame);
+setInterval(pollTick, 8);
 
 // ── Keyboard as a controller (fixed layout for now) ─────────────────────────
 
@@ -1116,7 +1172,7 @@ window.addEventListener("blur", () => {
 // ── Rumble ───────────────────────────────────────────────────────────────────
 
 function onRumble(r) {
-  const gp = (navigator.getGamepads ? navigator.getGamepads() : [])[r.local];
+  const gp = readPads().find((p) => p.index === r.local);
   if (!gp || !gp.vibrationActuator || !r.ms) return;
   gp.vibrationActuator.playEffect("dual-rumble", {
     duration: r.ms,
@@ -1262,7 +1318,7 @@ window.addEventListener("gamepadconnected", () => { padSeen = true; show($("pad-
 $("pad-hint-close").onclick = () => { padHintClosed = true; show($("pad-hint"), false); };
 if (iosApp) {
   setInterval(() => {
-    const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+    const pads = readPads();
     if (pads.length) padSeen = true;
     const onScreen = !$("home").classList.contains("hidden") || !$("stream").classList.contains("hidden");
     show($("pad-hint"), iosApp && !padSeen && !padHintClosed && onScreen && performance.now() > 4000);
