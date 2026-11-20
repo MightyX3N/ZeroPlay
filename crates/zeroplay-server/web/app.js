@@ -781,20 +781,40 @@ function currentQuality() {
   return q.current || q.setting || "max";
 }
 
+// A drop-down: pick once, so the stream restarts once.
+let qualityOpen = false;
+
 function renderQuality() {
   const now = currentQuality();
-  $("m-quality").textContent = `Quality: ${QUALITY_NAMES[now] || now}`;
+  $("m-quality").textContent = `Quality: ${QUALITY_NAMES[now] || now} ${qualityOpen ? "▴" : "▾"}`;
+  const allowed = allowedQualities();
+  document.querySelectorAll("#menu [data-quality]").forEach((el) => {
+    const q = el.dataset.quality;
+    show(el, qualityOpen && allowed.includes(q));
+    el.textContent = `${q === now ? "✓ " : ""}${QUALITY_NAMES[q]}`;
+  });
 }
 
 $("m-quality").onclick = () => {
-  const allowed = allowedQualities();
-  const now = currentQuality();
-  const next = allowed[(allowed.indexOf(now) + 1) % allowed.length] || allowed[0];
-  if (next && next !== now) {
-    send({ t: "quality", quality: next });
-    toast(`Quality: ${QUALITY_NAMES[next]}. The picture comes back in a few seconds.`, true);
-  }
+  qualityOpen = !qualityOpen;
+  renderMenu();
 };
+
+document.querySelectorAll("#menu [data-quality]").forEach((el) => {
+  el.onclick = () => {
+    const pick = el.dataset.quality;
+    qualityOpen = false;
+    // Back onto the Quality line itself.
+    const visible = () => menuItems().filter((item) => !item.classList.contains("hidden"));
+    if (pick !== currentQuality()) {
+      send({ t: "quality", quality: pick });
+      toast(`Quality: ${QUALITY_NAMES[pick]}. The picture comes back in a few seconds.`, true);
+    }
+    renderMenu();
+    menuIndex = Math.max(0, visible().indexOf($("m-quality")));
+    renderMenu();
+  };
+});
 
 function renderMenu() {
   if (!status) return;
@@ -836,6 +856,7 @@ function openMenu() {
 
 function closeMenu() {
   menuOpen = false;
+  qualityOpen = false;
   show($("menu"), false);
 }
 
