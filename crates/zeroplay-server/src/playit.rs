@@ -221,11 +221,11 @@ impl Playit {
         let find = |name: &str| tunnels.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)).cloned();
         let is_pending = |name: &str| pending.iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name));
 
-        let mut note = None;
+        let mut notes: Vec<String> = Vec::new();
         if find(WEB_TUNNEL).is_none() && !is_pending(WEB_TUNNEL) && !tried.contains(&WEB_TUNNEL) {
             tried.push(WEB_TUNNEL);
-            if let Err(error) = self.create_tunnel(&agent_id, WEB_TUNNEL, "custom-tcp", 1, "127.0.0.1", self.web_port).await {
-                note = Some(format!("Could not create the page tunnel: {error:#}"));
+            if let Err(error) = self.create_tunnel(&agent_id, WEB_TUNNEL, "tcp", 1, "127.0.0.1", self.web_port).await {
+                notes.push(format!("Could not create the page tunnel: {error:#}"));
             }
         }
         if find(VIDEO_TUNNEL).is_none() && !is_pending(VIDEO_TUNNEL) && !tried.contains(&VIDEO_TUNNEL) {
@@ -233,12 +233,12 @@ impl Playit {
             let first = self.rtc_ports.first().copied().unwrap_or(50000);
             let ip = lan_ip();
             let count = self.rtc_ports.len().min(u16::MAX as usize) as u16;
-            if let Err(error) = self.create_tunnel(&agent_id, VIDEO_TUNNEL, "custom-udp", count, &ip, first).await {
+            if let Err(error) = self.create_tunnel(&agent_id, VIDEO_TUNNEL, "udp", count, &ip, first).await {
                 // Port ranges need playit premium; one port works on a free account.
                 println!("[playit] {count} video ports refused ({error:#}), trying one port");
-                match self.create_tunnel(&agent_id, VIDEO_TUNNEL, "custom-udp", 1, &ip, first).await {
-                    Ok(()) => note = Some("Free playit account: one video port, so one player at a time from outside your home. playit premium allows more.".to_owned()),
-                    Err(error) => note = Some(format!("Could not create the video tunnel: {error:#}")),
+                match self.create_tunnel(&agent_id, VIDEO_TUNNEL, "udp", 1, &ip, first).await {
+                    Ok(()) => notes.push("Free playit account: one video port, so one player at a time from outside your home. playit premium allows more.".to_owned()),
+                    Err(error) => notes.push(format!("Could not create the video tunnel: {error:#}")),
                 }
             }
         }
@@ -251,7 +251,9 @@ impl Playit {
             Some((host, port?, count))
         });
         let mut current = self.tunnels.lock().unwrap();
-        let new = Tunnels { web, video, note: note.or_else(|| current.note.clone().filter(|n| n.starts_with("Free playit"))) };
+        // Keep only the lasting "free account" note once nothing new went wrong.
+        let note = if notes.is_empty() { current.note.clone().filter(|n| n.starts_with("Free playit")) } else { Some(notes.join(" ")) };
+        let new = Tunnels { web, video, note };
         if *current != new {
             *current = new;
             drop(current);
@@ -260,27 +262,26 @@ impl Playit {
         Ok(())
     }
 
-    async fn create_tunnel(&self, agent_id: &str, name: &str, kind: &str, ports: u16, local_ip: &str, local_port: u16) -> Result<()> {
+    /// Creates a tunnel to this agent with playit's tunnel API (the same
+    /// request playit's own command-line tool used for `tunnels prepare`).
+    async fn create_tunnel(&self, agent_id: &str, name: &str, port_type: &str, ports: u16, local_ip: &str, local_port: u16) -> Result<()> {
         let body = json!({
             "name": name,
-            "ports": { "type": kind, "details": ports },
+            "tunnel_type": null,
+            "port_type": port_type,
+            "port_count": ports,
             "origin": {
                 "type": "agent",
-                "data": {
-                    "agent_id": agent_id,
-                    "config": { "fields": [
-                        { "name": "local_ip", "value": local_ip },
-                        { "name": "local_port", "value": local_port.to_string() },
-                    ] },
-                },
+                "data": { "agent_id": agent_id, "local_ip": local_ip, "local_port": local_port },
             },
             "enabled": true,
             "alloc": null,
             "firewall_id": null,
+            "proxy_protocol": null,
         });
-        match self.call_as_agent("/v1/tunnels/create", body).await? {
+        match self.call_as_agent("/tunnels/create", body).await? {
             ApiResult::Success(_) => {
-                println!("[playit] created tunnel \"{name}\" ({kind}, {ports} port(s) to {local_ip}:{local_port})");
+                println!("[playit] created tunnel \"{name}\" ({port_type}, {ports} port(s) to {local_ip}:{local_port})");
                 Ok(())
             }
             other => bail!("{}", describe(&other)),
