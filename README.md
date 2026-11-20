@@ -27,6 +27,9 @@ the NAS.
 Open `http://<nas-address>:8080`, press **Get a sign-in code** and enter the
 code at microsoft.com/link. The sign-in is kept in the `/data` folder.
 
+The image is rebuilt and published automatically on every push to `main`
+(about 5 minutes; see the *Docker image* workflow under *Actions*).
+
 To build the image yourself instead: `docker build -t zeroplay .` and change
 `image:` in the compose file to `zeroplay`.
 
