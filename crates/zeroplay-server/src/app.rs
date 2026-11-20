@@ -756,16 +756,31 @@ impl App {
                     Default::default()
                 }
             };
-            anyhow::Ok((
-                reported,
-                apps.into_iter()
-                    .map(|a| Game {
-                        id: a.one_store_product_id.unwrap_or_default(),
-                        name: a.name.unwrap_or_else(|| "Game".to_owned()),
-                        image: art.get(&a.title_id).cloned(),
-                    })
-                    .collect::<Vec<_>>(),
-            ))
+            let mut games: Vec<Game> = apps
+                .into_iter()
+                .map(|a| Game {
+                    id: a.one_store_product_id.unwrap_or_default(),
+                    name: a.name.unwrap_or_else(|| "Game".to_owned()),
+                    image: art.get(&a.title_id).cloned(),
+                })
+                .collect();
+            // The Store has art for games Xbox Live has none for.
+            let missing: Vec<String> = games
+                .iter()
+                .filter(|g| g.image.is_none())
+                .map(|g| g.id.clone())
+                .collect();
+            if !missing.is_empty() {
+                match consoles::store_art(&self.http, &missing).await {
+                    Ok(store) => {
+                        for game in games.iter_mut().filter(|g| g.image.is_none()) {
+                            game.image = store.get(&game.id).cloned();
+                        }
+                    }
+                    Err(error) => println!("[games] no Store art: {error:#}"),
+                }
+            }
+            anyhow::Ok((reported, games))
         }
         .await;
         {

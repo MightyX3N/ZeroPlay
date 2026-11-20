@@ -228,6 +228,66 @@ pub async fn title_art(
     Ok(art)
 }
 
+/// Cover art from the Microsoft Store, by Store id. Used for games Xbox Live
+/// has no art for (often Xbox 360 games played on newer consoles).
+pub async fn store_art(
+    http: &reqwest::Client,
+    product_ids: &[String],
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut art = std::collections::HashMap::new();
+    for chunk in product_ids.chunks(20) {
+        let response = http
+            .get("https://displaycatalog.mp.microsoft.com/v7.0/products")
+            .query(&[
+                ("bigIds", chunk.join(",")),
+                ("market", "US".to_owned()),
+                ("languages", "en-US".to_owned()),
+            ])
+            .send()
+            .await?;
+        let body: serde_json::Value = check(response, "getting Store art").await?.json().await?;
+        art.extend(parse_store_art(&body));
+    }
+    Ok(art)
+}
+
+/// Picks a portrait cover (poster, then box art, then tile) for each product.
+fn parse_store_art(body: &serde_json::Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for product in body
+        .get("Products")
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = product.get("ProductId").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let images = product
+            .pointer("/LocalizedProperties/0/Images")
+            .and_then(|i| i.as_array());
+        let of_purpose = |wanted: &str| {
+            images.into_iter().flatten().find_map(|image| {
+                (image.get("ImagePurpose").and_then(|t| t.as_str()) == Some(wanted))
+                    .then(|| image.get("Uri").and_then(|u| u.as_str()))
+                    .flatten()
+            })
+        };
+        let url = of_purpose("Poster")
+            .or_else(|| of_purpose("BoxArt"))
+            .or_else(|| of_purpose("Tile"));
+        if let Some(url) = url {
+            let url = if let Some(rest) = url.strip_prefix("//") {
+                format!("https://{rest}")
+            } else {
+                url.replace("http://", "https://")
+            };
+            out.push((id.to_owned(), url));
+        }
+    }
+    out
+}
+
 /// Picks a portrait cover (poster or box art) for each title, else its display image.
 fn parse_art(body: &serde_json::Value) -> Vec<(u64, String)> {
     let mut out = Vec::new();
@@ -279,6 +339,23 @@ mod tests {
         );
         assert!(parsed.result[0].is_game);
         assert_eq!(parsed.result[1].one_store_product_id, None);
+    }
+
+    #[test]
+    fn picks_store_art() {
+        let body = serde_json::json!({ "Products": [
+            { "ProductId": "BRZ1", "LocalizedProperties": [ { "Images": [
+                { "ImagePurpose": "Tile", "Uri": "//store-images.s-microsoft.com/tile" },
+                { "ImagePurpose": "BoxArt", "Uri": "//store-images.s-microsoft.com/box" } ] } ] },
+            { "ProductId": "NONE", "LocalizedProperties": [ { "Images": [] } ] }
+        ]});
+        assert_eq!(
+            parse_store_art(&body),
+            vec![(
+                "BRZ1".to_owned(),
+                "https://store-images.s-microsoft.com/box".to_owned()
+            )]
+        );
     }
 
     #[test]
