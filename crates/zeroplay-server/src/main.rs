@@ -6,6 +6,7 @@
 
 mod app;
 mod config;
+mod playit;
 mod sdp;
 mod viewer;
 
@@ -117,6 +118,8 @@ enum FromPage {
     Key { code: u8, down: bool },
     Mouse { dx: i32, dy: i32, buttons: u8, wheel: i32 },
     Keyframe,
+    PlayitConnect,
+    PlayitDisconnect,
 }
 
 async fn client(app: Arc<App>, socket: WebSocket) {
@@ -223,6 +226,8 @@ async fn handle(app: &Arc<App>, id: u64, message: FromPage, peer: &mut Option<Vi
             app.send_mouse(MouseFrame { x: dx, y: dy, wheel_y: wheel, buttons, ..Default::default() })
         }
         FromPage::Keyframe => app.request_keyframe(),
+        FromPage::PlayitConnect => app.playit.connect(),
+        FromPage::PlayitDisconnect => app.playit.disconnect().await,
     }
     None
 }

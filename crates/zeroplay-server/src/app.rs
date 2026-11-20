@@ -18,6 +18,7 @@ use zeroplay_xbox::reqwest;
 use zeroplay_xbox::session::{start_home_session, MediaPacket, Session, SessionEvent, StreamOptions};
 
 use crate::config::Config;
+use crate::playit::Playit;
 
 /// Console slots on Xbox.
 pub const SLOTS: usize = 4;
@@ -74,6 +75,7 @@ pub struct App {
     /// Every packet from the console. Each player's connection subscribes.
     pub media: broadcast::Sender<MediaPacket>,
     updates: broadcast::Sender<()>,
+    pub playit: Arc<Playit>,
 }
 
 impl App {
@@ -85,6 +87,7 @@ impl App {
         let (media, _) = broadcast::channel(2048);
         let (updates, _) = broadcast::channel(64);
         let free_ports = config.rtc_ports.iter().rev().copied().collect();
+        let playit = Playit::new(&config.data_dir, http.clone(), updates.clone());
         let app = Arc::new(App {
             config,
             auth: tokio::sync::Mutex::new(auth),
@@ -107,7 +110,9 @@ impl App {
             next_viewer: AtomicU64::new(1),
             media,
             updates,
+            playit,
         });
+        app.playit.start_if_linked().await;
         if signed_in {
             let app2 = app.clone();
             tokio::spawn(async move { app2.refresh_consoles().await });
@@ -575,6 +580,7 @@ impl App {
             "players": players,
             "watching": watching,
             "you": { "id": id, "name": inner.viewers.get(&id).map(|v| v.name.clone()) },
+            "playit": self.playit.status(),
         })
     }
 }

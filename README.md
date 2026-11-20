@@ -38,12 +38,14 @@ Settings (environment variables in the compose file):
 | Setting | What it does |
 | --- | --- |
 | `ZEROPLAY_PASSWORD` | Password for the web page (any user name). Set it before using playit. |
-| `PLAYIT_SECRET` | playit.gg secret key. When set, the playit agent runs inside the container. |
+| `PLAYIT_SECRET` | Optional playit.gg agent secret key. Normally you link playit with the **Remote access** button (globe icon) on the page instead: it shows a playit.gg claim link to approve. |
 | `ZEROPLAY_RTC_PORTS` | UDP ports for video, one per connected player or watcher. Default `50000-50009`. |
 | `ZEROPLAY_ANNOUNCE` | Extra addresses players reach the video ports on, comma separated. `host` keeps the same ports; `host:12000` means the first video port is public port 12000 and the rest follow in order. |
 | `ZEROPLAY_HTTP` | Address of the web page. Default `0.0.0.0:8080`. |
 
-From outside the home network, two playit.gg tunnels are needed: TCP for the
+For use outside the home network, press the globe icon on the page, open the
+claim link and approve it on playit.gg. Then add two tunnels to the agent on
+playit.gg: TCP for the
 web page (port 8080) and UDP for the video ports (50000-50009). Put the UDP
 tunnel's address in `ZEROPLAY_ANNOUNCE`.
 

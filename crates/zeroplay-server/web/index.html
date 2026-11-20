@@ -21,6 +21,9 @@
     </div>
     <div class="topbar-right">
       <div id="players" class="players"></div>
+      <button id="btn-remote" class="icon-btn" aria-label="Remote access (playit.gg)" title="Remote access (playit.gg)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+      </button>
       <button id="btn-refresh" class="icon-btn" aria-label="Refresh consoles" title="Refresh consoles">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
       </button>
@@ -75,6 +78,31 @@
       <p class="muted small">This page continues by itself once you are signed in.</p>
     </div>
     <p id="signin-error" class="error hidden"></p>
+  </div>
+</section>
+
+<section id="remote" class="screen center overlay hidden">
+  <div class="panel">
+    <h1>Remote access</h1>
+    <p class="muted">playit.gg makes this page reachable from outside your home.</p>
+    <div id="remote-off">
+      <button id="btn-playit-connect" class="btn primary">Link playit.gg</button>
+    </div>
+    <div id="remote-claiming" class="hidden">
+      <p>Open this link, sign in to playit.gg if asked, and approve ZeroPlay:</p>
+      <a id="remote-link" class="link-box" href="#" target="_blank" rel="noopener"></a>
+      <p class="muted small">This continues by itself once it is approved.</p>
+    </div>
+    <div id="remote-running" class="hidden">
+      <p><b>playit.gg is linked and running.</b></p>
+      <p class="muted small">On playit.gg, add two tunnels to this agent: TCP to port 8080 (this page) and UDP to ports 50000-50009 (video). Put the UDP tunnel's address in ZEROPLAY_ANNOUNCE.</p>
+      <a class="btn secondary" href="https://playit.gg/account/tunnels" target="_blank" rel="noopener">Open playit.gg tunnels</a>
+    </div>
+    <p id="remote-error" class="error hidden"></p>
+    <div class="row">
+      <button id="btn-playit-disconnect" class="btn secondary hidden">Unlink</button>
+      <button id="btn-remote-close" class="btn secondary">Close</button>
+    </div>
   </div>
 </section>
 

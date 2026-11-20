@@ -65,8 +65,36 @@ function connect() {
 let selected = null;
 let wantWatch = false;
 
+let remoteOpen = false;
+
+function renderRemote(s) {
+  const p = s.playit || { state: "off" };
+  show($("remote"), remoteOpen);
+  show($("remote-off"), p.state === "off" || p.state === "failed");
+  show($("remote-claiming"), p.state === "claiming");
+  show($("remote-running"), p.state === "running");
+  show($("btn-playit-disconnect"), p.state !== "off");
+  $("btn-playit-disconnect").textContent = p.state === "claiming" ? "Cancel" : "Unlink";
+  show($("remote-error"), !!p.error);
+  $("remote-error").textContent = p.error || "";
+  if (p.url) {
+    $("remote-link").href = p.url;
+    $("remote-link").textContent = p.url.replace(/^https?:\/\//, "");
+  }
+  $("btn-remote").classList.toggle("on", p.state === "running");
+}
+
+$("btn-remote").onclick = () => { remoteOpen = true; renderRemote(status); };
+$("btn-remote-close").onclick = () => { remoteOpen = false; renderRemote(status); };
+$("btn-playit-connect").onclick = () => send({ t: "playitConnect" });
+$("btn-playit-disconnect").onclick = () => {
+  if (status && status.playit && status.playit.state === "claiming") return send({ t: "playitDisconnect" });
+  if (window.confirm("Unlink playit.gg? The page will no longer be reachable from outside your home.")) send({ t: "playitDisconnect" });
+};
+
 function onStatus(s) {
   status = s;
+  renderRemote(s);
   const stream = s.stream;
   if (stream.state === "failed" && stream.error !== lastError) toast(stream.error);
   lastError = stream.state === "failed" ? stream.error : "";
