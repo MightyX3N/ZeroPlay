@@ -1074,6 +1074,24 @@ function saveRecording() {
 if ("serviceWorker" in navigator && window.isSecureContext) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
+// iOS home-screen apps have a WebKit bug where controllers sometimes do not
+// show up (most often after the app was closed with the controller still on).
+// Tapping the page or turning the controller off and on brings it back, so
+// say so when no controller has been seen.
+const iosApp = navigator.standalone === true || (window.matchMedia("(display-mode: standalone)").matches && /iP(hone|ad|od)/.test(navigator.userAgent));
+let padSeen = false;
+let padHintClosed = false;
+window.addEventListener("gamepadconnected", () => { padSeen = true; show($("pad-hint"), false); });
+$("pad-hint-close").onclick = () => { padHintClosed = true; show($("pad-hint"), false); };
+if (iosApp) {
+  setInterval(() => {
+    const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+    if (pads.length) padSeen = true;
+    const onScreen = !$("home").classList.contains("hidden") || !$("stream").classList.contains("hidden");
+    show($("pad-hint"), iosApp && !padSeen && !padHintClosed && onScreen && performance.now() > 4000);
+  }, 1000);
+}
+
 // iPhones have no full-screen mode for pages; the home-screen app is full screen already.
 show($("m-fullscreen"), !!document.fullscreenEnabled && !window.matchMedia("(display-mode: standalone)").matches);
 
