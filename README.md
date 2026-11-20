@@ -56,6 +56,11 @@ While playing:
   are made in the browser from the video it already receives, and saved on
   that device.
 
+**As an app:** on iPhone or iPad open the page in Safari, then *Share → Add to
+Home Screen*. ZeroPlay then opens full screen like an app (log in once more
+there; it keeps its own login). Android and desktop Chrome/Edge offer
+*Install* as well.
+
 With a free playit account the video tunnel gets one port, so one player at a
 time can stream from outside the home; playit premium allows more.
 

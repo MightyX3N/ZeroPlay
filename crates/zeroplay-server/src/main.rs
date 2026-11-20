@@ -35,6 +35,12 @@ use viewer::ViewerPeer;
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
+const MANIFEST: &str = include_str!("../web/manifest.webmanifest");
+const SERVICE_WORKER: &str = include_str!("../web/sw.js");
+const ICON_192: &[u8] = include_bytes!("../web/icons/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("../web/icons/icon-512.png");
+const ICON_MASKABLE: &[u8] = include_bytes!("../web/icons/icon-maskable-512.png");
+const APPLE_ICON: &[u8] = include_bytes!("../web/icons/apple-touch-icon.png");
 
 #[tokio::main]
 async fn main() {
@@ -80,6 +86,13 @@ fn router(app: Arc<App>, door: Door) -> Router {
         .route("/", get(|| async { page(INDEX_HTML, "text/html; charset=utf-8") }))
         .route("/app.js", get(|| async { page(APP_JS, "text/javascript; charset=utf-8") }))
         .route("/style.css", get(|| async { page(STYLE_CSS, "text/css; charset=utf-8") }))
+        .route("/manifest.webmanifest", get(|| async { page(MANIFEST, "application/manifest+json") }))
+        .route("/sw.js", get(|| async { page(SERVICE_WORKER, "text/javascript; charset=utf-8") }))
+        .route("/icons/icon-192.png", get(|| async { image(ICON_192) }))
+        .route("/icons/icon-512.png", get(|| async { image(ICON_512) }))
+        .route("/icons/icon-maskable-512.png", get(|| async { image(ICON_MASKABLE) }))
+        .route("/icons/apple-touch-icon.png", get(|| async { image(APPLE_ICON) }))
+        .route("/apple-touch-icon.png", get(|| async { image(APPLE_ICON) }))
         .route("/api/access", get(access_state))
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
@@ -88,6 +101,10 @@ fn router(app: Arc<App>, door: Door) -> Router {
         .route("/ws", get(ws_upgrade))
         .layer(Extension(door))
         .with_state(app)
+}
+
+fn image(body: &'static [u8]) -> Response {
+    ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=86400")], body).into_response()
 }
 
 fn page(body: &'static str, content_type: &'static str) -> Response {

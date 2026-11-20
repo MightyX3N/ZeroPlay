@@ -1067,4 +1067,14 @@ function saveRecording() {
   toast("Recording saved to this device.", true);
 }
 
+// ── App on the home screen ──────────────────────────────────────────────────
+
+// Service workers need https (or the home network's http://localhost); on a
+// plain http address the page still installs on iOS through the manifest.
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+// iPhones have no full-screen mode for pages; the home-screen app is full screen already.
+show($("m-fullscreen"), !!document.fullscreenEnabled && !window.matchMedia("(display-mode: standalone)").matches);
+
 checkAccess();
