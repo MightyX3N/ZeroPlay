@@ -39,6 +39,7 @@ let ws = null;
 let status = null;
 let lastError = "";
 let seenStatus = false;
+let prevStreamState = "";
 
 function send(message) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
@@ -328,6 +329,7 @@ function onStatus(s) {
     return;
   }
   if (stream.state === "starting") {
+    prevStreamState = "starting";
     renderWaking(stream);
     if (!watching()) showScreen("waking");
     else {
@@ -338,9 +340,17 @@ function onStatus(s) {
     return;
   }
   const reconnecting = stream.state === "reconnecting";
+  if (reconnecting) prevStreamState = "reconnecting";
   show($("reconnecting"), reconnecting && watching());
   if (reconnecting) $("reconnect-text").textContent = `Lost the connection to the Xbox. The game was paused. Reconnecting (try ${stream.attempt} of 3)…`;
   if ((stream.state === "live" || (reconnecting && watching())) && wantWatch) {
+    // The Xbox stream was started again under us (quality change or
+    // reconnect): start the video connection fresh too, so nothing buffered
+    // from before puts the picture and sound behind.
+    if (watching() && stream.state === "live" && (prevStreamState === "starting" || prevStreamState === "reconnecting")) {
+      refreshVideo();
+    }
+    prevStreamState = stream.state;
     if (!watching()) startWatching();
     renderMenu();
     renderTurnChip(s);
@@ -680,6 +690,14 @@ async function onAnswer(sdp) {
   } catch (error) {
     toast(`Could not start the video: ${error.message}`);
   }
+}
+
+// A new video connection, keeping the player's place and controllers.
+function refreshVideo() {
+  if (recorder) stopRecording();
+  if (pc) { pc.close(); pc = null; }
+  if (feed) { feed.close(); feed = null; }
+  startWatching();
 }
 
 function stopWatching() {

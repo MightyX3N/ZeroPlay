@@ -241,27 +241,37 @@ async fn build(
 /// console's stream is started again (a quality change or a reconnect). The new
 /// stream starts from other numbers; without this the browser takes its
 /// packets for old ones and drops them (the sound stayed silent).
+///
+/// The timestamps move on by the time that really passed between the two
+/// streams; otherwise the browser takes the new packets for late ones and
+/// plays everything behind (picture and sound out of sync).
 struct Continuity {
     source: Option<(u32, u16, u32)>,
     seq_offset: u16,
     ts_offset: u32,
     last_out: Option<(u16, u32)>,
-    /// Timestamp step to leave between the old and the new stream.
-    gap: u32,
+    last_at: Option<std::time::Instant>,
+    /// RTP clock ticks per second (90 000 for video, 48 000 for Opus).
+    rate: u32,
 }
 
 impl Continuity {
-    fn new(gap: u32) -> Self {
+    fn new(rate: u32) -> Self {
         Continuity {
             source: None,
             seq_offset: 0,
             ts_offset: 0,
             last_out: None,
-            gap,
+            last_at: None,
+            rate,
         }
     }
 
     fn apply(&mut self, header: &mut rtc::rtp::header::Header) {
+        self.apply_at(header, std::time::Instant::now())
+    }
+
+    fn apply_at(&mut self, header: &mut rtc::rtp::header::Header, now: std::time::Instant) {
         let (ssrc, seq, ts) = (header.ssrc, header.sequence_number, header.timestamp);
         let new_source = match self.source {
             None => false,
@@ -272,8 +282,13 @@ impl Continuity {
         };
         if new_source {
             if let Some((out_seq, out_ts)) = self.last_out {
+                let elapsed = self
+                    .last_at
+                    .map(|at| now.saturating_duration_since(at))
+                    .unwrap_or_default();
+                let gap = ((elapsed.as_secs_f64() * self.rate as f64) as u32).max(1);
                 self.seq_offset = out_seq.wrapping_add(1).wrapping_sub(seq);
-                self.ts_offset = out_ts.wrapping_add(self.gap).wrapping_sub(ts);
+                self.ts_offset = out_ts.wrapping_add(gap).wrapping_sub(ts);
             }
         }
         self.source = Some((ssrc, seq, ts));
@@ -283,7 +298,10 @@ impl Continuity {
         // Remember the newest packet sent (not one that arrived late).
         match self.last_out {
             Some((last, _)) if out.0.wrapping_sub(last) > 32768 => {}
-            _ => self.last_out = Some(out),
+            _ => {
+                self.last_out = Some(out);
+                self.last_at = Some(now);
+            }
         }
     }
 }
@@ -296,8 +314,8 @@ async fn forward(
     (video_ssrc, video_pt): (u32, u8),
     (audio_ssrc, audio_pt): (u32, u8),
 ) {
-    let mut video_seq = Continuity::new(3000);
-    let mut audio_seq = Continuity::new(960);
+    let mut video_seq = Continuity::new(90_000);
+    let mut audio_seq = Continuity::new(48_000);
     loop {
         let (mut packet, track, ssrc, pt) = match media.recv().await {
             Ok(MediaPacket::Video(mut packet)) => {
@@ -341,28 +359,36 @@ mod continuity_tests {
     }
 
     #[test]
-    fn a_new_stream_continues_the_numbers() {
-        let mut c = Continuity::new(960);
+    fn a_new_stream_continues_after_the_time_that_passed() {
+        let mut c = Continuity::new(48_000);
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
         let mut out = Vec::new();
-        for (ssrc, seq, ts) in [
-            (1, 100, 1000),
-            (1, 101, 1960),
-            (2, 40000, 7),
-            (2, 40001, 967),
+        // Old stream, then 3 seconds of nothing, then the new stream.
+        for (ssrc, seq, ts, ms) in [
+            (1, 100, 1000, 0),
+            (1, 101, 1960, 20),
+            (2, 40000, 7, 3020),
+            (2, 40001, 967, 3040),
         ] {
             let mut h = header(ssrc, seq, ts);
-            c.apply(&mut h);
+            c.apply_at(&mut h, at(ms));
             out.push((h.sequence_number, h.timestamp));
         }
         assert_eq!(
             out,
-            vec![(100, 1000), (101, 1960), (102, 2920), (103, 3880)]
+            vec![
+                (100, 1000),
+                (101, 1960),
+                (102, 1960 + 144_000),
+                (103, 1960 + 144_960)
+            ]
         );
     }
 
     #[test]
     fn ordinary_packets_pass_unchanged() {
-        let mut c = Continuity::new(3000);
+        let mut c = Continuity::new(90_000);
         for (seq, ts) in [
             (65534u16, 10u32),
             (65535, 3010),
