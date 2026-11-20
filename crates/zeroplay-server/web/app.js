@@ -403,7 +403,11 @@ setInterval(async () => {
 
 let menuOpen = false;
 let menuIndex = 0;
-let keyboardOn = localStorage.getItem("zp-keyboard") !== "off";
+// Saved per device (this browser). With nothing saved: on for computers with a
+// mouse, off for phones and tablets.
+const hasMouse = window.matchMedia("(pointer: fine)").matches;
+const savedKeyboard = localStorage.getItem("zp-keyboard");
+let keyboardOn = savedKeyboard ? savedKeyboard === "on" : hasMouse;
 const SENSITIVITIES = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
 let mouseSens = Number(localStorage.getItem("zp-mouse-sens")) || 1;
 let statsOn = localStorage.getItem("zp-stats") === "on";
@@ -416,6 +420,7 @@ function renderMenu() {
   $("menu-players").textContent = `${n} playing · ${status.watching.length} watching`;
   $("m-keyboard").textContent = `Keyboard and mouse: ${keyboardOn ? "on" : "off"}`;
   $("m-sens").textContent = `Mouse sensitivity: ${mouseSens}`;
+  show($("m-sens"), hasMouse && keyboardOn);
   $("m-players").textContent = separatePlayers ? "Controllers here: separate players" : "Controllers here: one player";
   $("m-stats").textContent = statsOn ? "Hide stats" : "Show stats";
   show($("stats"), statsOn);
@@ -614,7 +619,7 @@ function pollPads() {
   } else {
     comboSince = 0;
   }
-  show($("mouse-hint"), playing && keyboardOn && !mouseLocked());
+  show($("mouse-hint"), playing && keyboardOn && hasMouse && !mouseLocked());
 }
 setInterval(pollPads, 8);
 

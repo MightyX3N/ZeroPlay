@@ -97,7 +97,8 @@ svg.fill { fill: currentColor; stroke: none; }
 .stats span { background: rgba(0,0,0,.6); padding: 6px 12px; border-radius: 999px; }
 .mouse-hint { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); background: rgba(0,0,0,.7); padding: 8px 16px; border-radius: 999px; font-size: 13px; pointer-events: none; }
 .tap { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.4); }
-.menu { position: absolute; top: 0; left: 0; bottom: 0; width: min(360px, 100%); background: rgba(13,15,14,.95); padding: 28px 24px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+.menu { position: absolute; top: 0; left: 0; bottom: 0; width: min(360px, 100%); background: rgba(13,15,14,.95); padding: max(28px, env(safe-area-inset-top)) 24px max(28px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); display: flex; flex-direction: column; gap: 6px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; }
+.menu > * { flex-shrink: 0; }
 .menu .now { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
 .menu .now strong { font-size: 18px; }
 .menu-item { min-height: 48px; text-align: left; padding: 0 16px; border: 0; border-radius: 8px; background: transparent; font-size: 15px; }
