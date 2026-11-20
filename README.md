@@ -50,8 +50,10 @@ web page (port 8080) and UDP for the video ports (50000-50009). Put the UDP
 tunnel's address in `ZEROPLAY_ANNOUNCE`.
 
 In the browser: controllers work as soon as they are plugged in, each in its
-own console slot (up to four players). Keyboard and mouse work as a controller
-too (switch them off in the in-game menu: F1, or hold View + Menu). Click the
+console slot. All controllers, the keyboard and the mouse in one browser are
+one player, so you can switch between them; for couch co-op on one device,
+set *Controllers here* to *separate players* in the in-game menu. Keyboard and
+mouse work as a controller (switch them off in the in-game menu: F1, or hold View + Menu). Click the
 picture to capture the mouse, Esc lets it go.
 
 | Keyboard / mouse | Controller |

@@ -356,6 +356,7 @@ function renderMenu() {
   $("menu-players").textContent = `${n} playing · ${status.watching.length} watching`;
   $("m-keyboard").textContent = `Keyboard and mouse: ${keyboardOn ? "on" : "off"}`;
   $("m-sens").textContent = `Mouse sensitivity: ${mouseSens}`;
+  $("m-players").textContent = separatePlayers ? "Controllers here: separate players" : "Controllers here: one player";
   $("m-stats").textContent = statsOn ? "Hide stats" : "Show stats";
   show($("stats"), statsOn);
   menuItems().forEach((el, i) => el.classList.toggle("active", i === menuIndex));
@@ -380,10 +381,19 @@ $("m-keyboard").onclick = () => {
   keyboardOn = !keyboardOn;
   localStorage.setItem("zp-keyboard", keyboardOn ? "on" : "off");
   if (!keyboardOn) {
-    send({ t: "unplug", local: KEYBOARD_LOCAL });
-    sent.delete(KEYBOARD_LOCAL);
+    if (separatePlayers) {
+      send({ t: "unplug", local: KEYBOARD_LOCAL });
+      sent.delete(KEYBOARD_LOCAL);
+    }
     if (document.pointerLockElement) document.exitPointerLock();
   }
+  renderMenu();
+};
+$("m-players").onclick = () => {
+  separatePlayers = !separatePlayers;
+  localStorage.setItem("zp-separate", separatePlayers ? "on" : "off");
+  unplugAll();
+  mergedWasActive = false;
   renderMenu();
 };
 $("m-sens").onclick = () => {
@@ -473,20 +483,67 @@ function navigate(bits, local) {
   }
 }
 
+// One player per browser by default: every controller, the keyboard and the
+// mouse are merged, so you can switch between them (or use them together).
+// "Separate players" gives each controller its own console slot instead.
+let separatePlayers = localStorage.getItem("zp-separate") === "on";
+const MERGED_LOCAL = 0;
+
+function combine(states) {
+  const out = neutral();
+  const bigger = (a, b) => (Math.hypot(b[0], b[1]) > Math.hypot(a[0], a[1]) ? b : a);
+  let left = [0, 0];
+  let right = [0, 0];
+  for (const s of states) {
+    out.buttons |= s.buttons;
+    left = bigger(left, [s.lx, s.ly]);
+    right = bigger(right, [s.rx, s.ry]);
+    out.lt = Math.max(out.lt, s.lt);
+    out.rt = Math.max(out.rt, s.rt);
+  }
+  [out.lx, out.ly] = left;
+  [out.rx, out.ry] = right;
+  return out;
+}
+
+let mergedWasActive = false;
+
 function pollPads() {
   const inStream = pc !== null && !$("stream").classList.contains("hidden");
-  const seen = new Set();
+  const playing = inStream && !menuOpen;
+  const states = new Map(); // local index → state, for this tick
   let combo = false;
   for (const gp of navigator.getGamepads ? navigator.getGamepads() : []) {
     if (!gp || !gp.connected) continue;
-    const local = gp.index;
-    seen.add(local);
     const state = padState(gp);
     if ((state.buttons & BTN.view) && (state.buttons & BTN.menu)) combo = true;
-    if (inStream && !menuOpen) sendPad(local, state);
-    else navigate(state.buttons, local);
-    prevButtons.set(local, state.buttons);
+    if (playing) states.set(gp.index, state);
+    else navigate(state.buttons, gp.index);
+    prevButtons.set(gp.index, state.buttons);
   }
+  updateMouseStick();
+  const kbActive = playing && keyboardOn && (keysDown.size > 0 || mouseLocked());
+  if (kbActive) states.set(KEYBOARD_LOCAL, keyboardState());
+
+  if (separatePlayers) {
+    for (const [local, state] of states) sendPad(local, state);
+    if (!kbActive && kbWasActive) sendPad(KEYBOARD_LOCAL, neutral());
+    // Controllers that went away are unplugged on the console too.
+    for (const local of [...sent.keys()]) {
+      if (local !== KEYBOARD_LOCAL && !states.has(local) && playing) {
+        send({ t: "unplug", local });
+        sent.delete(local);
+      }
+    }
+  } else if (states.size) {
+    sendPad(MERGED_LOCAL, combine([...states.values()]));
+    mergedWasActive = true;
+  } else if (mergedWasActive) {
+    sendPad(MERGED_LOCAL, neutral());
+    mergedWasActive = false;
+  }
+  kbWasActive = kbActive;
+
   // Holding View + Menu for 0.8 s opens or closes the menu.
   if (combo && inStream) {
     if (!comboSince) comboSince = performance.now();
@@ -497,18 +554,7 @@ function pollPads() {
   } else {
     comboSince = 0;
   }
-  // Controllers that went away are unplugged on the console too.
-  for (const local of [...sent.keys()]) {
-    if (local !== KEYBOARD_LOCAL && !seen.has(local)) {
-      send({ t: "unplug", local });
-      sent.delete(local);
-    }
-  }
-  updateMouseStick();
-  const kbActive = inStream && !menuOpen && keyboardOn && (keysDown.size > 0 || mouseLocked());
-  if (kbActive || kbWasActive) sendPad(KEYBOARD_LOCAL, kbActive ? keyboardState() : neutral());
-  kbWasActive = kbActive;
-  show($("mouse-hint"), inStream && !menuOpen && keyboardOn && !mouseLocked());
+  show($("mouse-hint"), playing && keyboardOn && !mouseLocked());
 }
 setInterval(pollPads, 8);
 
@@ -638,21 +684,16 @@ window.addEventListener("keydown", (event) => {
   if (KEY_BUTTONS[event.code] !== undefined || KEY_OTHER.has(event.code)) {
     event.preventDefault();
     keysDown.add(event.code);
-    sendPad(KEYBOARD_LOCAL, keyboardState());
   }
 });
 
 window.addEventListener("keyup", (event) => {
   if (!keysDown.delete(event.code)) return;
   event.preventDefault();
-  sendPad(KEYBOARD_LOCAL, keyboardState());
 });
 
 window.addEventListener("blur", () => {
-  if (keysDown.size) {
-    keysDown.clear();
-    sendPad(KEYBOARD_LOCAL, keyboardState());
-  }
+  keysDown.clear();
 });
 
 // ── Rumble ───────────────────────────────────────────────────────────────────
