@@ -2,12 +2,17 @@
 
 Play your consoles from any device, with any controller or with mouse and keyboard.
 
-ZeroPlay is a streaming client built around one shared input layer. Each
-streaming service is an addon; the first one is Xbox Remote Play.
+ZeroPlay runs as a Docker container on a NAS at home. It keeps one Remote Play
+session open to your console and lets several people play it from anywhere,
+in a browser, a desktop app (Windows and Linux) or an Android app, reached
+through a playit.gg tunnel. Each streaming service is an addon; the first one
+is Xbox Remote Play.
 
-**Status: milestone 0.** There is no app window yet. This repo holds the Xbox
-Remote Play protocol in Rust and a small command-line test tool that proves it
-works against a real console.
+The full plan is in [docs/plan.md](docs/plan.md).
+
+**Status: milestone 0.** There is no server or app yet. This repo holds the
+Xbox Remote Play protocol in Rust and a small command-line test tool that
+proves it works against a real console.
 
 ## What works
 
@@ -90,6 +95,7 @@ cannot prove that a real Xbox accepts the same bytes; the checklist above does t
 | --- | --- |
 | `crates/zeroplay-xbox` | Xbox Remote Play: sign-in, console list, session API, WebRTC stream, input packets |
 | `crates/zeroplay-spike` | The command-line test tool |
+| `docs/plan.md` | The plan: NAS server, relay, input layer, addons, apps |
 
 ## Credits and licence
 
