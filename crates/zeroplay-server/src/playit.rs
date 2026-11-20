@@ -209,7 +209,7 @@ impl Playit {
             let mut wait = Duration::from_secs(5);
             while self.is_current(generation) {
                 let child = tokio::process::Command::new(&self.program)
-                    .arg("--secret_path")
+                    .arg("--secret-path")
                     .arg(&self.secret_path)
                     .arg("--platform-docker")
                     .stdout(Stdio::piped())
