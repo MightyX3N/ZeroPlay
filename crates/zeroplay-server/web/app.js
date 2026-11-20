@@ -775,19 +775,22 @@ function allowedQualities() {
   return QUALITIES.slice(Math.max(0, limit));
 }
 
-function renderQuality() {
+// What the stream runs at right now.
+function currentQuality() {
   const q = (status && status.quality) || {};
-  const setting = q.setting || "max";
-  let text = `Quality: ${QUALITY_NAMES[setting] || setting}`;
-  if (q.current && q.current !== setting) text += ` · now ${QUALITY_NAMES[q.current] || q.current}`;
-  $("m-quality").textContent = text;
+  return q.current || q.setting || "max";
+}
+
+function renderQuality() {
+  const now = currentQuality();
+  $("m-quality").textContent = `Quality: ${QUALITY_NAMES[now] || now}`;
 }
 
 $("m-quality").onclick = () => {
   const allowed = allowedQualities();
-  const setting = (status && status.quality && status.quality.setting) || "max";
-  const next = allowed[(allowed.indexOf(setting) + 1) % allowed.length] || allowed[0];
-  if (next && next !== setting) {
+  const now = currentQuality();
+  const next = allowed[(allowed.indexOf(now) + 1) % allowed.length] || allowed[0];
+  if (next && next !== now) {
     send({ t: "quality", quality: next });
     toast(`Quality: ${QUALITY_NAMES[next]}. The picture comes back in a few seconds.`, true);
   }

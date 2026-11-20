@@ -237,6 +237,57 @@ async fn build(
 }
 
 /// Takes the console's packets and writes them to this player's tracks.
+/// Keeps a player's sequence numbers and timestamps running on when the
+/// console's stream is started again (a quality change or a reconnect). The new
+/// stream starts from other numbers; without this the browser takes its
+/// packets for old ones and drops them (the sound stayed silent).
+struct Continuity {
+    source: Option<(u32, u16, u32)>,
+    seq_offset: u16,
+    ts_offset: u32,
+    last_out: Option<(u16, u32)>,
+    /// Timestamp step to leave between the old and the new stream.
+    gap: u32,
+}
+
+impl Continuity {
+    fn new(gap: u32) -> Self {
+        Continuity {
+            source: None,
+            seq_offset: 0,
+            ts_offset: 0,
+            last_out: None,
+            gap,
+        }
+    }
+
+    fn apply(&mut self, header: &mut rtc::rtp::header::Header) {
+        let (ssrc, seq, ts) = (header.ssrc, header.sequence_number, header.timestamp);
+        let new_source = match self.source {
+            None => false,
+            Some((last_ssrc, last_seq, _)) => {
+                let jump = seq.wrapping_sub(last_seq);
+                last_ssrc != ssrc || (jump > 3000 && jump < 62536)
+            }
+        };
+        if new_source {
+            if let Some((out_seq, out_ts)) = self.last_out {
+                self.seq_offset = out_seq.wrapping_add(1).wrapping_sub(seq);
+                self.ts_offset = out_ts.wrapping_add(self.gap).wrapping_sub(ts);
+            }
+        }
+        self.source = Some((ssrc, seq, ts));
+        header.sequence_number = seq.wrapping_add(self.seq_offset);
+        header.timestamp = ts.wrapping_add(self.ts_offset);
+        let out = (header.sequence_number, header.timestamp);
+        // Remember the newest packet sent (not one that arrived late).
+        match self.last_out {
+            Some((last, _)) if out.0.wrapping_sub(last) > 32768 => {}
+            _ => self.last_out = Some(out),
+        }
+    }
+}
+
 async fn forward(
     app: Arc<App>,
     mut media: broadcast::Receiver<MediaPacket>,
@@ -245,10 +296,18 @@ async fn forward(
     (video_ssrc, video_pt): (u32, u8),
     (audio_ssrc, audio_pt): (u32, u8),
 ) {
+    let mut video_seq = Continuity::new(3000);
+    let mut audio_seq = Continuity::new(960);
     loop {
         let (mut packet, track, ssrc, pt) = match media.recv().await {
-            Ok(MediaPacket::Video(packet)) => (packet, &video, video_ssrc, video_pt),
-            Ok(MediaPacket::Audio(packet)) => (packet, &audio, audio_ssrc, audio_pt),
+            Ok(MediaPacket::Video(mut packet)) => {
+                video_seq.apply(&mut packet.header);
+                (packet, &video, video_ssrc, video_pt)
+            }
+            Ok(MediaPacket::Audio(mut packet)) => {
+                audio_seq.apply(&mut packet.header);
+                (packet, &audio, audio_ssrc, audio_pt)
+            }
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 // This player fell behind and lost packets: ask for a fresh picture.
                 app.request_keyframe();
@@ -264,6 +323,57 @@ async fn forward(
         packet.header.extensions.clear();
         // Fails until the browser has connected; those packets are simply dropped.
         let _ = track.write_rtp(packet).await;
+    }
+}
+
+#[cfg(test)]
+mod continuity_tests {
+    use super::Continuity;
+    use rtc::rtp::header::Header;
+
+    fn header(ssrc: u32, seq: u16, ts: u32) -> Header {
+        Header {
+            ssrc,
+            sequence_number: seq,
+            timestamp: ts,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_new_stream_continues_the_numbers() {
+        let mut c = Continuity::new(960);
+        let mut out = Vec::new();
+        for (ssrc, seq, ts) in [
+            (1, 100, 1000),
+            (1, 101, 1960),
+            (2, 40000, 7),
+            (2, 40001, 967),
+        ] {
+            let mut h = header(ssrc, seq, ts);
+            c.apply(&mut h);
+            out.push((h.sequence_number, h.timestamp));
+        }
+        assert_eq!(
+            out,
+            vec![(100, 1000), (101, 1960), (102, 2920), (103, 3880)]
+        );
+    }
+
+    #[test]
+    fn ordinary_packets_pass_unchanged() {
+        let mut c = Continuity::new(3000);
+        for (seq, ts) in [
+            (65534u16, 10u32),
+            (65535, 3010),
+            (0, 6010),
+            (2, 9010),
+            (1, 9010),
+        ] {
+            let mut h = header(5, seq, ts);
+            c.apply(&mut h);
+            assert_eq!((h.sequence_number, h.timestamp), (seq, ts));
+        }
     }
 }
 
