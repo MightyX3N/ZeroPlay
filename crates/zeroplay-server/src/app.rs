@@ -802,9 +802,12 @@ impl App {
             .map(|d| d.name);
         let audio = match settings.audio.as_deref() {
             None => None,
-            Some("auto") => card_name
-                .as_deref()
-                .and_then(crate::capture::matching_audio)
+            Some("auto") => crate::capture::sound_of_card(&device)
+                .or_else(|| {
+                    card_name
+                        .as_deref()
+                        .and_then(crate::capture::matching_audio)
+                })
                 .map(|a| a.id),
             Some(id) => Some(id.to_owned()),
         };

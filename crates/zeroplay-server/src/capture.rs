@@ -79,8 +79,64 @@ pub fn video_devices() -> Vec<VideoDevice> {
 }
 
 /// Sound cards from /proc/asound/cards (" 1 [S4K ]: USB-Audio - Cam Link 4K").
+/// Docker hides /proc/asound, so the cards are read from /sys (with
+/// /proc/asound as a fallback).
 pub fn audio_devices() -> Vec<AudioDevice> {
-    parse_asound_cards(&std::fs::read_to_string("/proc/asound/cards").unwrap_or_default())
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/sound") {
+        for entry in entries.flatten() {
+            let node = entry.file_name().to_string_lossy().to_string();
+            if !node.starts_with("card") {
+                continue;
+            }
+            let dir = entry.path();
+            let Ok(id) = std::fs::read_to_string(dir.join("id")) else {
+                continue;
+            };
+            let id = id.trim().to_owned();
+            // The USB product name, if it is a USB card.
+            let name = ["device/../product", "device/product"]
+                .iter()
+                .find_map(|p| std::fs::read_to_string(dir.join(p)).ok())
+                .map(|n| n.trim().to_owned())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| id.clone());
+            out.push(AudioDevice { id, name });
+        }
+    }
+    if out.is_empty() {
+        out =
+            parse_asound_cards(&std::fs::read_to_string("/proc/asound/cards").unwrap_or_default());
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// The USB device a /sys class entry belongs to (the parent of its interface).
+fn usb_device(class_dir: &str) -> Option<std::path::PathBuf> {
+    let interface = std::fs::canonicalize(format!("{class_dir}/device")).ok()?;
+    interface.parent().map(|p| p.to_path_buf())
+}
+
+/// The sound card on the same USB device as a capture card.
+pub fn sound_of_card(video_path: &str) -> Option<AudioDevice> {
+    let node = video_path.strip_prefix("/dev/")?;
+    let usb = usb_device(&format!("/sys/class/video4linux/{node}"))?;
+    let entries = std::fs::read_dir("/sys/class/sound").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("card") {
+            continue;
+        }
+        if usb_device(&entry.path().to_string_lossy()) == Some(usb.clone()) {
+            let id = std::fs::read_to_string(entry.path().join("id"))
+                .ok()?
+                .trim()
+                .to_owned();
+            return audio_devices().into_iter().find(|a| a.id == id);
+        }
+    }
+    None
 }
 
 fn parse_asound_cards(text: &str) -> Vec<AudioDevice> {
@@ -403,7 +459,7 @@ fn ffmpeg_args(
     preset: &str,
 ) -> Vec<String> {
     let (kbps, small) = video_settings(quality);
-    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "warning", "-nostdin"]
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -705,7 +761,7 @@ pub async fn start(
         "-f",
         "v4l2",
         "-thread_queue_size",
-        "64",
+        "512",
         "-fflags",
         "nobuffer",
     ]
@@ -725,10 +781,17 @@ pub async fn start(
     // The processor's encoder gets a better (slower) setting when there are
     // fewer pixels a second to encode.
     let preset = match &chosen {
-        Some(m) if (m.width as f64 * m.height as f64 * m.fps) <= 1920.0 * 1080.0 * 31.0 => {
-            "veryfast"
+        Some(m) => {
+            let rate = m.width as f64 * m.height as f64 * m.fps;
+            if rate <= 1280.0 * 720.0 * 31.0 {
+                "veryfast"
+            } else if rate <= 1920.0 * 1080.0 * 31.0 {
+                "superfast"
+            } else {
+                "ultrafast"
+            }
         }
-        _ => "superfast",
+        None => "superfast",
     };
     let described = if let Some(mode) = chosen.clone() {
         println!("[capture] card modes: {modes:?}");

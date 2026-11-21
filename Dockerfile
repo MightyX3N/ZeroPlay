@@ -6,13 +6,15 @@ WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p zeroplay-server
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 ARG TARGETARCH
 # ffmpeg encodes a capture card's picture; the VA-API drivers let it use the
-# NAS's graphics chip (Intel, AMD) for that.
-RUN apt-get update \
+# NAS's graphics chip for that. Intel's full driver (with the encoding parts)
+# is in Debian's non-free section.
+RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg v4l-utils mesa-va-drivers \
- && if [ "${TARGETARCH:-amd64}" = "amd64" ]; then apt-get install -y --no-install-recommends intel-media-va-driver i965-va-driver; fi \
+ && if [ "${TARGETARCH:-amd64}" = "amd64" ]; then apt-get install -y --no-install-recommends intel-media-va-driver-non-free i965-va-driver-shaders; fi \
  && rm -rf /var/lib/apt/lists/*
 
 # playit.gg agent (playitd 2.0.2, BSD-2-Clause), pinned with checksums.
