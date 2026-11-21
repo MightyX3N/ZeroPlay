@@ -844,6 +844,9 @@ impl App {
                 } else {
                     " Sound from the Xbox."
                 });
+                if settings.audio.is_some() && audio.is_none() {
+                    note.push_str(" No sound card was found for the capture card.");
+                }
                 if let Some(why) = &capture.sound_error {
                     note.push_str(&format!(" The card's sound did not work ({why})."));
                 }
