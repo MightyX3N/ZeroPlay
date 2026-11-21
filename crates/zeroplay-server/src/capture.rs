@@ -174,6 +174,80 @@ pub fn gpu() -> Option<&'static str> {
     (Path::new(path).exists() && std::fs::File::open(path).is_ok()).then_some(path)
 }
 
+/// Which graphics chip the NAS has, e.g. "Intel 0x46d1".
+pub fn gpu_model() -> String {
+    let read = |f: &str| {
+        std::fs::read_to_string(format!("/sys/class/drm/renderD128/device/{f}"))
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let vendor = match read("vendor").as_str() {
+        "0x8086" => "Intel".to_owned(),
+        "0x1002" => "AMD".to_owned(),
+        "0x10de" => "NVIDIA".to_owned(),
+        other => other.to_owned(),
+    };
+    let driver = std::fs::read_link("/sys/class/drm/renderD128/device/driver")
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    format!("{vendor} {} (kernel driver {driver})", read("device"))
+}
+
+/// Finds a VA-API driver that starts on this graphics chip: the automatic
+/// choice first, then each one by name. `Ok(None)` = the automatic choice.
+async fn vaapi_driver() -> std::result::Result<Option<&'static str>, String> {
+    let mut said = String::new();
+    for name in [None, Some("iHD"), Some("i965"), Some("radeonsi")] {
+        let mut command = Command::new("ffmpeg");
+        if let Some(name) = name {
+            command.env("LIBVA_DRIVER_NAME", name);
+        }
+        let output = command
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-init_hw_device",
+                "vaapi=va:/dev/dri/renderD128",
+                "-f",
+                "lavfi",
+                "-i",
+                "nullsrc=s=64x64",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .await;
+        match output {
+            Ok(o) if o.status.success() => {
+                println!(
+                    "[capture] graphics driver works: {}",
+                    name.unwrap_or("automatic")
+                );
+                return Ok(name);
+            }
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stderr);
+                if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
+                    said = line.to_owned();
+                }
+            }
+            Err(e) => said = e.to_string(),
+        }
+    }
+    let why = format!(
+        "no graphics driver starts on this chip: {} — {said}",
+        gpu_model()
+    );
+    println!("[capture] {why}");
+    Err(why)
+}
+
 /// Makes a device node the container lacks, from the kernel's numbers in
 /// /sys (the NAS shows the card in /sys even when /dev was not shared).
 fn ensure_node(path: &str, sys_dev: &str) {
@@ -661,18 +735,22 @@ async fn start_sound(
     args.push(format!("plughw:CARD={card}"));
     args.extend(
         [
+            // The card's sound timing jumps; resampling smooths it out
+            // instead of clicks and gaps.
+            "-af",
+            "aresample=async=1000:first_pts=0",
             "-c:a",
             "libopus",
             "-b:a",
-            "128k",
+            "160k",
             "-ar",
             "48000",
             "-ac",
             "2",
             "-application",
-            "lowdelay",
+            "audio",
             "-frame_duration",
-            "10",
+            "20",
             "-f",
             "rtp",
             "-payload_type",
@@ -760,10 +838,18 @@ pub async fn start(
     let mut input: Vec<String> = [
         "-f",
         "v4l2",
+        // A short queue: a late frame is dropped instead of every later
+        // frame waiting behind it (that delay only grew).
         "-thread_queue_size",
-        "512",
+        "4",
         "-fflags",
         "nobuffer",
+        "-flags",
+        "low_delay",
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -838,13 +924,23 @@ async fn start_with_input(
     media: broadcast::Sender<MediaPacket>,
     preset: &str,
 ) -> Result<Capture> {
+    let mut gpu_error: Option<String> = None;
+    let mut driver: Option<&'static str> = None;
     let encoders: Vec<Encoder> = if gpu().is_some() {
-        vec![Encoder::Gpu, Encoder::GpuLowPower, Encoder::Cpu]
+        match vaapi_driver().await {
+            Ok(found) => {
+                driver = found;
+                vec![Encoder::Gpu, Encoder::GpuLowPower, Encoder::Cpu]
+            }
+            Err(why) => {
+                gpu_error = Some(why);
+                vec![Encoder::Cpu]
+            }
+        }
     } else {
         vec![Encoder::Cpu]
     };
     let mut last_error = String::new();
-    let mut gpu_error: Option<String> = None;
     for encoder in encoders {
         let video_socket = UdpSocket::bind("127.0.0.1:0").await?;
         let audio_socket = UdpSocket::bind("127.0.0.1:0").await?;
@@ -857,7 +953,11 @@ async fn start_with_input(
             audio_socket.local_addr()?.port(),
             preset,
         );
-        let mut child = Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        if let (Some(name), true) = (driver, encoder != Encoder::Cpu) {
+            command.env("LIBVA_DRIVER_NAME", name);
+        }
+        let mut child = command
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
