@@ -35,6 +35,8 @@ pub struct CaptureSettings {
 pub struct VideoDevice {
     pub path: String,
     pub name: String,
+    /// The container can open it.
+    pub reachable: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -62,7 +64,10 @@ pub fn video_devices() -> Vec<VideoDevice> {
             .trim()
             .to_owned();
         let path = format!("/dev/{node}");
+        ensure_node(&path, &dir.join("dev").to_string_lossy());
+        let reachable = std::fs::File::open(&path).is_ok();
         out.push(VideoDevice {
+            reachable,
             name: if name.is_empty() { node } else { name },
             path,
         });
@@ -107,7 +112,65 @@ pub fn matching_audio(video_name: &str) -> Option<AudioDevice> {
 /// A GPU ffmpeg can encode on.
 pub fn gpu() -> Option<&'static str> {
     let path = "/dev/dri/renderD128";
-    Path::new(path).exists().then_some(path)
+    ensure_node(path, "/sys/class/drm/renderD128/dev");
+    (Path::new(path).exists() && std::fs::File::open(path).is_ok()).then_some(path)
+}
+
+/// Makes a device node the container lacks, from the kernel's numbers in
+/// /sys (the NAS shows the card in /sys even when /dev was not shared).
+fn ensure_node(path: &str, sys_dev: &str) {
+    if Path::new(path).exists() {
+        return;
+    }
+    let Ok(numbers) = std::fs::read_to_string(sys_dev) else {
+        return;
+    };
+    let Some((major, minor)) = numbers.trim().split_once(':') else {
+        return;
+    };
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let made = std::process::Command::new("mknod")
+        .args([path, "c", major, minor])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if made {
+        println!("[capture] made {path} ({major}:{minor})");
+    }
+}
+
+/// The nodes for a capture card and the sound cards.
+fn ensure_nodes(device: &str) {
+    if let Some(name) = device.strip_prefix("/dev/") {
+        ensure_node(device, &format!("/sys/class/video4linux/{name}/dev"));
+    }
+    if let Ok(entries) = std::fs::read_dir("/sys/class/sound") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("control") || name.starts_with("pcm") {
+                ensure_node(
+                    &format!("/dev/snd/{name}"),
+                    &format!("/sys/class/sound/{name}/dev"),
+                );
+            }
+        }
+    }
+}
+
+/// Checks the container may open the card, with a message saying what to do.
+fn check_access(device: &str) -> Result<()> {
+    ensure_nodes(device);
+    match std::fs::File::open(device) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "The NAS sees the capture card, but ZeroPlay's container cannot reach {device}. Add the capture card lines from the compose file (/dev:/dev and device_cgroup_rules) to the container and recreate it."
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(1) => bail!(
+            "The container is not allowed to use {device}. Add the device_cgroup_rules lines from the compose file to the container and recreate it."
+        ),
+        Err(e) => bail!("Could not open {device}: {e}"),
+    }
 }
 
 /// One input format the card offers.
@@ -400,6 +463,7 @@ pub async fn start(
     quality: Quality,
     media: broadcast::Sender<MediaPacket>,
 ) -> Result<Capture> {
+    check_access(device)?;
     let formats = card_formats(device).await;
     let mut input: Vec<String> = [
         "-f",

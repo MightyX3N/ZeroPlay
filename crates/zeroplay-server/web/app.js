@@ -154,7 +154,7 @@ function renderCapture(s) {
   const option = (value, text) => el("option", { value, textContent: text });
   $("cap-device").replaceChildren(
     option("", "Xbox remote play"),
-    ...c.devices.map((d) => option(d.path, `Capture card: ${d.name} (${d.path})`)));
+    ...c.devices.map((d) => option(d.path, `Capture card: ${d.name} (${d.path})${d.reachable ? "" : " – not reachable yet"}`)));
   if (c.device && !c.devices.find((d) => d.path === c.device)) $("cap-device").append(option(c.device, `${c.device} (not found now)`));
   $("cap-device").value = c.device || "";
   $("cap-audio").replaceChildren(
@@ -167,7 +167,7 @@ function renderCapture(s) {
   if (c.device) lines.push(c.gpu ? "Encoding on the graphics chip." : "No graphics chip visible to ZeroPlay, so the processor encodes (uses more of it).");
   if (c.note) lines.push(c.note);
   $("cap-note").textContent = lines.join(" ");
-  show($("cap-help"), c.devices.length === 0);
+  show($("cap-help"), c.devices.length === 0 || c.devices.some((d) => !d.reachable));
 }
 
 const sendCapture = () => send({ t: "adminCapture", device: $("cap-device").value || null, audio: $("cap-device").value ? ($("cap-audio").value || null) : null });

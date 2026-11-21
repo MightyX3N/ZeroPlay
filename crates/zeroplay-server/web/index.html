@@ -182,7 +182,7 @@
     </label>
     <p id="cap-note" class="muted small"></p>
     <div id="cap-help" class="muted small hidden">
-      <p>No capture card is visible to ZeroPlay. Plug in a capture card that works like a webcam, and give the container access by adding these lines under <code>zeroplay:</code> in its compose file, then recreate it:</p>
+      <p>ZeroPlay's container needs access to capture cards. Plug in a capture card that works like a webcam, and add these lines under <code>zeroplay:</code> in its compose file (they are in the repo's compose file), then recreate the container:</p>
       <pre class="code">    volumes:
       - /dev:/dev
     device_cgroup_rules:
