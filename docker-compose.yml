@@ -14,3 +14,10 @@ services:
       # Microsoft sign-in, password and playit link are kept here.
       # Change the left side to a folder on your NAS.
       - ./zeroplay-data:/data
+      # Capture cards, their sound, and the graphics chip for encoding. Works
+      # without any of them plugged in.
+      - /dev:/dev
+    device_cgroup_rules:
+      - 'c 81:* rmw'   # capture cards (video4linux)
+      - 'c 116:* rmw'  # sound (ALSA)
+      - 'c 226:* rmw'  # graphics chip (video encoding)

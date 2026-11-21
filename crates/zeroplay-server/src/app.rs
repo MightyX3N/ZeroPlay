@@ -2,7 +2,7 @@
 //! the one stream from the console, and who holds which controller slot.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -138,6 +138,14 @@ pub struct App {
     next_viewer: AtomicU64,
     /// Every packet from the console. Each player's connection subscribes.
     pub media: broadcast::Sender<MediaPacket>,
+    /// The console's own packets; passed on to `media` unless a capture card
+    /// supplies that part.
+    console_media: broadcast::Sender<MediaPacket>,
+    capture: Mutex<Option<crate::capture::Capture>>,
+    capture_video: AtomicBool,
+    capture_audio: AtomicBool,
+    /// What the capture card is doing (or why it is not), for the admin.
+    capture_note: Mutex<Option<String>>,
     updates: broadcast::Sender<()>,
     pub playit: Arc<Playit>,
     pub access: Access,
@@ -152,6 +160,7 @@ impl App {
             .timeout(Duration::from_secs(30))
             .build()?;
         let (media, _) = broadcast::channel(2048);
+        let (console_media, _) = broadcast::channel(2048);
         let (updates, _) = broadcast::channel(64);
         let free_ports = config.rtc_ports.iter().rev().copied().collect();
         let playit = Playit::new(
@@ -186,11 +195,37 @@ impl App {
             generation: AtomicU64::new(0),
             next_viewer: AtomicU64::new(1),
             media,
+            console_media,
+            capture: Mutex::new(None),
+            capture_video: AtomicBool::new(false),
+            capture_audio: AtomicBool::new(false),
+            capture_note: Mutex::new(None),
             updates,
             playit,
             access,
         });
         app.playit.start_if_linked().await;
+        // The console's packets reach players unless the capture card covers them.
+        let relay = app.clone();
+        tokio::spawn(async move {
+            let mut from_console = relay.console_media.subscribe();
+            loop {
+                match from_console.recv().await {
+                    Ok(MediaPacket::Video(p)) => {
+                        if !relay.capture_video.load(Ordering::Relaxed) {
+                            let _ = relay.media.send(MediaPacket::Video(p));
+                        }
+                    }
+                    Ok(MediaPacket::Audio(p)) => {
+                        if !relay.capture_audio.load(Ordering::Relaxed) {
+                            let _ = relay.media.send(MediaPacket::Audio(p));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
         let ticker = app.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(Duration::from_secs(1));
@@ -341,6 +376,19 @@ impl App {
             }
         };
         println!("[stream] switching quality to {wanted:?}");
+        // With a capture card only the encoder starts again; the Xbox stays connected.
+        if self.capture.lock().unwrap().is_some() {
+            self.inner.lock().unwrap().stream_quality = Some(wanted);
+            let app = self.clone();
+            tokio::spawn(async move { app.start_capture(wanted).await });
+            self.changed();
+            return;
+        }
+        self.restart_stream(console_id, "Changing quality");
+    }
+
+    /// Starts the Xbox stream again under the players (they keep their place).
+    pub fn restart_stream(self: &Arc<Self>, console_id: String, step: &'static str) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let app = self.clone();
         tokio::spawn(async move {
@@ -357,7 +405,7 @@ impl App {
                 inner.stream = StreamState::Starting {
                     console_id: console_id.clone(),
                     console_name,
-                    step: "Changing quality".to_owned(),
+                    step: step.to_owned(),
                 };
             }
             app.changed();
@@ -720,6 +768,115 @@ impl App {
         }
     }
 
+    // ── Capture card ───────────────────────────────────────────────────────
+
+    /// Starts (or restarts) the capture card at `quality`. If it does not
+    /// work, the Xbox's own remote play picture is used instead.
+    async fn start_capture(&self, quality: Quality) {
+        self.stop_capture();
+        let settings = self.access.settings().capture;
+        let Some(device) = settings.device.clone() else {
+            return;
+        };
+        let card_name = crate::capture::video_devices()
+            .into_iter()
+            .find(|d| d.path == device)
+            .map(|d| d.name);
+        let audio = match settings.audio.as_deref() {
+            None => None,
+            Some("auto") => card_name
+                .as_deref()
+                .and_then(crate::capture::matching_audio)
+                .map(|a| a.id),
+            Some(id) => Some(id.to_owned()),
+        };
+        let note =
+            match crate::capture::start(&device, audio.as_deref(), quality, self.media.clone())
+                .await
+            {
+                Ok(capture) => {
+                    let note = format!(
+                        "Picture from {} ({}), encoded on the {}. Sound from {}.",
+                        card_name.as_deref().unwrap_or("the capture card"),
+                        device,
+                        capture.encoder,
+                        if audio.is_some() {
+                            "the capture card"
+                        } else {
+                            "the Xbox"
+                        }
+                    );
+                    self.capture_video.store(true, Ordering::Relaxed);
+                    self.capture_audio.store(audio.is_some(), Ordering::Relaxed);
+                    *self.capture.lock().unwrap() = Some(capture);
+                    self.request_keyframe();
+                    note
+                }
+                Err(error) => {
+                    let message =
+                        format!("{error:#} The Xbox's remote play picture is used instead.");
+                    let watchers: Vec<u64> = self
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .watchers
+                        .iter()
+                        .copied()
+                        .collect();
+                    for viewer in watchers {
+                        self.send_direct(
+                            viewer,
+                            Direct::Error {
+                                message: message.clone(),
+                            },
+                        );
+                    }
+                    message
+                }
+            };
+        *self.capture_note.lock().unwrap() = Some(note);
+        self.changed();
+    }
+
+    fn stop_capture(&self) {
+        self.capture_video.store(false, Ordering::Relaxed);
+        self.capture_audio.store(false, Ordering::Relaxed);
+        self.capture.lock().unwrap().take();
+    }
+
+    /// The admin picks the picture source. A running stream starts again with it.
+    pub async fn set_capture(
+        self: &Arc<Self>,
+        settings: crate::capture::CaptureSettings,
+    ) -> Result<()> {
+        self.access.set_capture(settings).await?;
+        *self.capture_note.lock().unwrap() = None;
+        let live = match &self.inner.lock().unwrap().stream {
+            StreamState::Live { console_id, .. } => Some(console_id.clone()),
+            _ => None,
+        };
+        if let Some(console_id) = live {
+            self.stop_capture();
+            self.restart_stream(console_id, "Switching picture source");
+        }
+        self.changed();
+        Ok(())
+    }
+
+    /// What the admin sees about capture cards.
+    fn capture_status(&self) -> Value {
+        let settings = self.access.settings().capture;
+        json!({
+            "devices": crate::capture::video_devices(),
+            "audio": crate::capture::audio_devices(),
+            "gpu": crate::capture::gpu().is_some(),
+            "device": settings.device,
+            "audioChoice": settings.audio,
+            "active": self.capture.lock().unwrap().is_some(),
+            "note": self.capture_note.lock().unwrap().clone(),
+        })
+    }
+
     // ── Game library ───────────────────────────────────────────────────────
 
     /// Reads the games installed on a console (at most once a minute unless
@@ -935,10 +1092,14 @@ impl App {
         }
         self.set_step("Starting stream");
         let quality = self.wanted_quality();
+        // With a capture card the remote play picture is only a backup: ask
+        // the console for the lightest one.
+        let capturing = self.access.settings().capture.device.is_some();
+        let console_quality = if capturing { Quality::Low } else { quality };
         let signaling = {
             let mut auth = self.auth.lock().await;
             let token = auth.home_streaming_token().await?;
-            let api = HomeApi::new(&token)?.with_720p(quality.is_720p());
+            let api = HomeApi::new(&token)?.with_720p(console_quality.is_720p());
             let app = self.clone();
             let status = move |line: &str| {
                 println!("[stream] {line}");
@@ -953,8 +1114,8 @@ impl App {
         self.set_step("Connecting");
         let signaling = Arc::new(signaling);
         let options = StreamOptions {
-            media: Some(self.media.clone()),
-            max_video_kbps: quality.max_video_kbps(),
+            media: Some(self.console_media.clone()),
+            max_video_kbps: console_quality.max_video_kbps(),
             ..Default::default()
         };
         let mut session = match Session::connect(signaling.clone(), options).await {
@@ -1005,6 +1166,9 @@ impl App {
         }
         self.changed();
         println!("[stream] live at {quality:?}");
+        if capturing {
+            self.start_capture(quality).await;
+        }
 
         if let Some(mut events) = events {
             let app = self.clone();
@@ -1153,6 +1317,7 @@ impl App {
     }
 
     async fn end_stream(&self, reason: Option<String>) {
+        self.stop_capture();
         let session = self.session.lock().unwrap().take();
         if let Some(session) = session {
             let _ = session.shutdown().await;
@@ -1275,6 +1440,7 @@ impl App {
                 (console.clone(), Value::from(list))
             })
             .collect();
+        let capture = admin.is_some().then(|| self.capture_status());
         let all_games = admin.is_some().then(|| {
             let mut all: Vec<(String, String)> = inner
                 .games
@@ -1308,6 +1474,7 @@ impl App {
             // Every game on every console, for the admin's profile editor.
             "allGames": all_games,
             "gamesNote": inner.games_note.clone(),
+            "capture": capture,
             "admin": admin,
             "turns": turns,
             "quality": {

@@ -143,8 +143,44 @@ function el(tag, props = {}, ...children) {
   return node;
 }
 
+// Picture source: the Xbox's remote play picture, or a capture card.
+let lastCapture = "";
+function renderCapture(s) {
+  const c = s && s.capture;
+  if (!c) return;
+  const key = JSON.stringify(c);
+  if (key === lastCapture) return;
+  lastCapture = key;
+  const option = (value, text) => el("option", { value, textContent: text });
+  $("cap-device").replaceChildren(
+    option("", "Xbox remote play"),
+    ...c.devices.map((d) => option(d.path, `Capture card: ${d.name} (${d.path})`)));
+  if (c.device && !c.devices.find((d) => d.path === c.device)) $("cap-device").append(option(c.device, `${c.device} (not found now)`));
+  $("cap-device").value = c.device || "";
+  $("cap-audio").replaceChildren(
+    option("", "Xbox remote play sound"),
+    option("auto", "From the capture card (found automatically)"),
+    ...c.audio.map((a) => option(a.id, `Sound card: ${a.name}`)));
+  $("cap-audio").value = c.audioChoice || "";
+  $("cap-audio").disabled = !c.device;
+  const lines = [];
+  if (c.device) lines.push(c.gpu ? "Encoding on the graphics chip." : "No graphics chip visible to ZeroPlay, so the processor encodes (uses more of it).");
+  if (c.note) lines.push(c.note);
+  $("cap-note").textContent = lines.join(" ");
+  show($("cap-help"), c.devices.length === 0);
+}
+
+const sendCapture = () => send({ t: "adminCapture", device: $("cap-device").value || null, audio: $("cap-device").value ? ($("cap-audio").value || null) : null });
+$("cap-device").onchange = () => {
+  // Picking a card takes its sound too, unless chosen otherwise.
+  if ($("cap-device").value && !$("cap-audio").value) $("cap-audio").value = "auto";
+  sendCapture();
+};
+$("cap-audio").onchange = sendCapture;
+
 function renderProfiles(s) {
   const admin = s && s.admin;
+  renderCapture(s);
   show($("btn-profiles"), !!admin);
   const timeRequests = (admin && admin.timeRequests) || [];
   show($("requests-badge"), !!(admin && (admin.requests.length || timeRequests.length)));

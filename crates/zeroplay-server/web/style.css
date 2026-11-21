@@ -75,6 +75,7 @@ svg.fill { fill: currentColor; stroke: none; }
 .tile.game { width: 140px; height: 210px; background-size: cover; background-position: center; }
 .tile.game .label { font-size: 13px; }
 .hero-art { background-size: cover; background-position: center; }
+pre.code { background: rgba(0,0,0,.35); padding: 10px 12px; border-radius: 8px; overflow-x: auto; font-size: 12px; }
 .game-checks { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow: auto; padding: 4px 0; }
 .hints { display: flex; gap: 22px; flex-wrap: wrap; margin-top: auto; }
 .hints span { display: flex; align-items: center; gap: 6px; }

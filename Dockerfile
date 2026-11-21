@@ -7,12 +7,15 @@ COPY . .
 RUN cargo build --release --locked -p zeroplay-server
 
 FROM debian:bookworm-slim
+ARG TARGETARCH
+# ffmpeg encodes a capture card's picture; the VA-API drivers let it use the
+# NAS's graphics chip (Intel, AMD) for that.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg mesa-va-drivers \
+ && if [ "${TARGETARCH:-amd64}" = "amd64" ]; then apt-get install -y --no-install-recommends intel-media-va-driver i965-va-driver; fi \
  && rm -rf /var/lib/apt/lists/*
 
 # playit.gg agent (playitd 2.0.2, BSD-2-Clause), pinned with checksums.
-ARG TARGETARCH
 ADD --checksum=sha256:9d27a8dbb4d2d8a7107fcabfa33028c789a30a64c97a36447fe4afb94e08dde9 https://github.com/playit-cloud/playit-agent/releases/download/v2.0.2/playit-linux-amd64 /tmp/playit-amd64
 ADD --checksum=sha256:aed86fc2b82a772ca0e1d5cddec6c3123f96e12a099f7ae45aaa59a9a430a2cd https://github.com/playit-cloud/playit-agent/releases/download/v2.0.2/playit-linux-aarch64 /tmp/playit-arm64
 RUN cp "/tmp/playit-${TARGETARCH:-amd64}" /usr/local/bin/playit && chmod 755 /usr/local/bin/playit && rm -f /tmp/playit-*

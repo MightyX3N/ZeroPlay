@@ -6,6 +6,7 @@
 
 mod access;
 mod app;
+mod capture;
 mod config;
 mod control;
 mod playit;
@@ -326,6 +327,11 @@ enum FromPage {
         console: String,
         game: String,
     },
+    /// The admin picks where the picture comes from.
+    AdminCapture {
+        device: Option<String>,
+        audio: Option<String>,
+    },
     /// The shared stream quality.
     Quality {
         quality: access::Quality,
@@ -564,6 +570,17 @@ async fn handle(
         FromPage::Turns { on } => app.set_turns(id, on),
         FromPage::RequestTime => return app.request_time(id),
         FromPage::Quality { quality } => return app.set_quality(id, quality).await,
+        FromPage::AdminCapture { device, audio } => {
+            if !is_admin(app, id) {
+                return error("Only an admin can change this.".to_owned());
+            }
+            if let Err(e) = app
+                .set_capture(capture::CaptureSettings { device, audio })
+                .await
+            {
+                return error(format!("{e:#}"));
+            }
+        }
         FromPage::Launch { console, game } => {
             if let Err(e) = app.launch(id, &console, &game) {
                 return error(format!("{e:#}"));

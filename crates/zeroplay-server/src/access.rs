@@ -151,6 +151,9 @@ pub struct Settings {
     /// among the people watching).
     #[serde(default)]
     pub quality: Quality,
+    /// Picture (and sound) from a capture card instead of remote play.
+    #[serde(default)]
+    pub capture: crate::capture::CaptureSettings,
 }
 
 fn thirty() -> u32 {
@@ -164,6 +167,7 @@ impl Default for Settings {
             timed_play: false,
             turn_minutes: 30,
             quality: Quality::Max,
+            capture: Default::default(),
         }
     }
 }
@@ -433,6 +437,11 @@ impl Access {
             stored.settings.timed_play = enabled;
             stored.settings.turn_minutes = minutes;
         }
+        self.save().await
+    }
+
+    pub async fn set_capture(&self, capture: crate::capture::CaptureSettings) -> Result<()> {
+        self.stored.lock().unwrap().settings.capture = capture;
         self.save().await
     }
 

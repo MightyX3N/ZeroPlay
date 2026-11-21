@@ -181,3 +181,14 @@ UnknownSKL (Jim Kroon) in Greenlight, xbox-xcloud-player, xal-node and
 xbox-webapi-node, all MIT. See [CREDITS.md](CREDITS.md).
 
 ZeroPlay is not made or endorsed by Microsoft.
+
+## Capture card (optional)
+
+A capture card between the Xbox and the TV gives a cleaner picture than remote
+play. Cards that work like a webcam (most current ones) are supported: plug it
+into the NAS, then pick it under **Profiles → Picture source**. Remote play
+stays connected for the controllers. The compose file above already gives the
+container access to capture cards, sound and the graphics chip (used for
+encoding when there is one). Turn off HDCP on the Xbox (Settings → General →
+TV & display options → Video fidelity), or the card only gets a black picture.
+

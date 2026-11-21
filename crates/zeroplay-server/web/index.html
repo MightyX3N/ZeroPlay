@@ -172,6 +172,26 @@
       </select>
     </label>
 
+    <h2>Picture source</h2>
+    <p class="muted small">A capture card between the Xbox and the TV gives a cleaner picture than remote play. Remote play stays connected for the controllers.</p>
+    <label class="field">Picture
+      <select id="cap-device"></select>
+    </label>
+    <label class="field">Sound
+      <select id="cap-audio"></select>
+    </label>
+    <p id="cap-note" class="muted small"></p>
+    <div id="cap-help" class="muted small hidden">
+      <p>No capture card is visible to ZeroPlay. Plug in a capture card that works like a webcam, and give the container access by adding these lines under <code>zeroplay:</code> in its compose file, then recreate it:</p>
+      <pre class="code">    volumes:
+      - /dev:/dev
+    device_cgroup_rules:
+      - 'c 81:* rmw'
+      - 'c 116:* rmw'
+      - 'c 226:* rmw'</pre>
+      <p>Also turn off HDCP on the Xbox (Settings → General → TV &amp; display options → Video fidelity), or the card only gets a black picture.</p>
+    </div>
+
     <h2>Profiles</h2>
     <div id="profile-list" class="list"></div>
 
