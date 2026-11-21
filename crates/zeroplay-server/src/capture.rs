@@ -421,16 +421,95 @@ fn ffmpeg_args(
 
 /// A running capture. Stops ffmpeg when dropped.
 pub struct Capture {
-    child: Child,
+    children: Vec<Child>,
     tasks: Vec<JoinHandle<()>>,
     pub encoder: &'static str,
+    /// Sound comes from the card (else the Xbox's sound is used).
+    pub sound: bool,
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        for child in &mut self.children {
+            let _ = child.start_kill();
+        }
         for task in &self.tasks {
             task.abort();
+        }
+    }
+}
+
+/// The card's sound as Opus RTP, in its own ffmpeg.
+async fn start_sound(
+    card: &str,
+    socket: UdpSocket,
+    media: broadcast::Sender<MediaPacket>,
+) -> Result<(Child, JoinHandle<()>)> {
+    let port = socket.local_addr()?.port();
+    let mut args: Vec<String> = [
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-nostdin",
+        "-f",
+        "alsa",
+        "-thread_queue_size",
+        "1024",
+        "-ac",
+        "2",
+        "-ar",
+        "48000",
+        "-i",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.push(format!("plughw:CARD={card}"));
+    args.extend(
+        [
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "128k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-application",
+            "lowdelay",
+            "-frame_duration",
+            "10",
+            "-f",
+            "rtp",
+            "-payload_type",
+            "111",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args.push(format!("rtp://127.0.0.1:{port}?pkt_size=1200"));
+    let mut child = Command::new("ffmpeg")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("ffmpeg is missing")?;
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[capture sound] {line}");
+            }
+        });
+    }
+    let mut probe = [0u8; 2048];
+    match tokio::time::timeout(Duration::from_secs(5), socket.peek_from(&mut probe)).await {
+        Ok(Ok(_)) => Ok((child, pump(socket, media, false))),
+        _ => {
+            let _ = child.start_kill();
+            bail!("no sound packets from {card}")
         }
     }
 }
@@ -507,7 +586,7 @@ async fn start_with_input(
         let audio_socket = UdpSocket::bind("127.0.0.1:0").await?;
         let args = ffmpeg_args(
             input,
-            audio,
+            None,
             encoder,
             quality,
             video_socket.local_addr()?.port(),
@@ -547,14 +626,26 @@ async fn start_with_input(
                     Encoder::Cpu => "processor",
                 };
                 println!("[capture] running, encoding on the {name}");
-                return Ok(Capture {
-                    child,
-                    tasks: vec![
-                        pump(video_socket, media.clone(), true),
-                        pump(audio_socket, media, false),
-                    ],
+                let mut capture = Capture {
+                    children: vec![child],
+                    tasks: vec![pump(video_socket, media.clone(), true)],
                     encoder: name,
-                });
+                    sound: false,
+                };
+                // Sound runs on its own: one ffmpeg reading both the card's
+                // picture and its sound waits on the slower of the two, and
+                // the picture froze after a second.
+                if let Some(card) = audio {
+                    match start_sound(card, audio_socket, media).await {
+                        Ok((child, task)) => {
+                            capture.children.push(child);
+                            capture.tasks.push(task);
+                            capture.sound = true;
+                        }
+                        Err(error) => println!("[capture] no sound from the card: {error:#}"),
+                    }
+                }
+                return Ok(capture);
             }
             _ => {
                 let _ = child.start_kill();

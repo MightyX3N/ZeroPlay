@@ -800,14 +800,14 @@ impl App {
                         card_name.as_deref().unwrap_or("the capture card"),
                         device,
                         capture.encoder,
-                        if audio.is_some() {
+                        if capture.sound {
                             "the capture card"
                         } else {
                             "the Xbox"
                         }
                     );
                     self.capture_video.store(true, Ordering::Relaxed);
-                    self.capture_audio.store(audio.is_some(), Ordering::Relaxed);
+                    self.capture_audio.store(capture.sound, Ordering::Relaxed);
                     *self.capture.lock().unwrap() = Some(capture);
                     self.request_keyframe();
                     note
