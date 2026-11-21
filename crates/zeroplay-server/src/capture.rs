@@ -244,6 +244,108 @@ fn choose_format(formats: &[Format]) -> Option<(String, (u32, u32))> {
     })
 }
 
+/// One mode a card can send: format, size and frame rate.
+#[derive(Clone, Debug, PartialEq)]
+struct Mode {
+    /// ffmpeg's name for the format (mjpeg, yuyv422, nv12, ...).
+    format: String,
+    width: u32,
+    height: u32,
+    fps: f64,
+}
+
+impl Mode {
+    fn raw(&self) -> bool {
+        self.format != "mjpeg"
+    }
+}
+
+/// Parses `v4l2-ctl --list-formats-ext`.
+fn parse_modes(text: &str) -> Vec<Mode> {
+    let mut out = Vec::new();
+    let mut format: Option<String> = None;
+    let mut size: Option<(u32, u32)> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.contains("]: '") {
+            let fourcc = line.split('\'').nth(1).unwrap_or("");
+            format = match fourcc {
+                "MJPG" => Some("mjpeg"),
+                "YUYV" => Some("yuyv422"),
+                "UYVY" => Some("uyvy422"),
+                "NV12" => Some("nv12"),
+                "YU12" => Some("yuv420p"),
+                _ => None,
+            }
+            .map(str::to_owned);
+            size = None;
+        } else if let Some(rest) = line.strip_prefix("Size: Discrete ") {
+            size = rest
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.parse().ok()?, h.trim().parse().ok()?)));
+        } else if line.starts_with("Interval:") {
+            let fps = line
+                .split('(')
+                .nth(1)
+                .and_then(|r| r.split_whitespace().next())
+                .and_then(|n| n.parse::<f64>().ok());
+            if let (Some(format), Some((width, height)), Some(fps)) = (&format, size, fps) {
+                out.push(Mode {
+                    format: format.clone(),
+                    width,
+                    height,
+                    fps,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The best real mode for games: smooth first (50+ fps, then 25+), then the
+/// biggest picture up to 1080p, then uncompressed over MJPEG.
+fn choose_mode(modes: &[Mode]) -> Option<Mode> {
+    let bucket = |fps: f64| {
+        if fps >= 49.0 {
+            2
+        } else if fps >= 24.0 {
+            1
+        } else {
+            0
+        }
+    };
+    modes
+        .iter()
+        .filter(|m| m.height <= 1080)
+        .max_by(|a, b| {
+            (
+                bucket(a.fps),
+                a.width * a.height,
+                a.raw(),
+                (a.fps * 100.0) as u32,
+            )
+                .cmp(&(
+                    bucket(b.fps),
+                    b.width * b.height,
+                    b.raw(),
+                    (b.fps * 100.0) as u32,
+                ))
+        })
+        .cloned()
+}
+
+async fn card_modes(device: &str) -> Vec<Mode> {
+    let output = Command::new("v4l2-ctl")
+        .args(["--list-formats-ext", "-d", device])
+        .stdin(Stdio::null())
+        .output()
+        .await;
+    match output {
+        Ok(output) => parse_modes(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
 async fn card_formats(device: &str) -> Vec<Format> {
     let output = Command::new("ffmpeg")
         .args([
@@ -319,7 +421,14 @@ fn ffmpeg_args(
         );
         args.push(format!("plughw:CARD={card}"));
     }
-    args.extend(["-map".into(), "0:v:0".into()]);
+    // Real frames only: no repeats to fill a frame rate (they hid that the
+    // card sent few pictures, and add delay).
+    args.extend([
+        "-map".into(),
+        "0:v:0".into(),
+        "-fps_mode".into(),
+        "passthrough".into(),
+    ]);
     let rate = format!("{kbps}k");
     let buffer = format!("{}k", kbps / 2);
     match encoder {
@@ -570,7 +679,6 @@ pub async fn start(
     media: broadcast::Sender<MediaPacket>,
 ) -> Result<Capture> {
     check_access(device)?;
-    let formats = card_formats(device).await;
     let mut input: Vec<String> = [
         "-f",
         "v4l2",
@@ -578,25 +686,46 @@ pub async fn start(
         "64",
         "-fflags",
         "nobuffer",
-        "-framerate",
-        "60",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
-    if let Some((format, (w, h))) = choose_format(&formats) {
+    // The modes the card really has (with frame rates); else a guess from
+    // ffmpeg's list of formats.
+    let modes = card_modes(device).await;
+    let described = if let Some(mode) = choose_mode(&modes) {
+        println!("[capture] card modes: {modes:?}");
         input.extend([
             "-input_format".into(),
-            format,
+            mode.format.clone(),
             "-video_size".into(),
-            format!("{w}x{h}"),
+            format!("{}x{}", mode.width, mode.height),
+            "-framerate".into(),
+            format!("{}", mode.fps),
         ]);
-    }
+        format!(
+            "{}x{} {} at {:.0} fps",
+            mode.width, mode.height, mode.format, mode.fps
+        )
+    } else {
+        let formats = card_formats(device).await;
+        input.extend(["-framerate".into(), "60".into()]);
+        match choose_format(&formats) {
+            Some((format, (w, h))) => {
+                input.extend([
+                    "-input_format".into(),
+                    format.clone(),
+                    "-video_size".into(),
+                    format!("{w}x{h}"),
+                ]);
+                format!("{w}x{h} {format}")
+            }
+            None => "the card's default format".to_owned(),
+        }
+    };
     input.extend(["-i".into(), device.to_owned()]);
     let mut capture = start_with_input(&input, audio, quality, media).await?;
-    capture.input = choose_format(&formats)
-        .map(|(f, (w, h))| format!("{w}x{h} {f}"))
-        .unwrap_or_else(|| "the card's default format".to_owned());
+    capture.input = described;
     Ok(capture)
 }
 
@@ -699,6 +828,32 @@ async fn start_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chooses_a_smooth_mode() {
+        let text = "ioctl: VIDIOC_ENUM_FMT\n\tType: Video Capture\n\n\t[0]: 'MJPG' (Motion-JPEG, compressed)\n\t\tSize: Discrete 1920x1080\n\t\t\tInterval: Discrete 0.033s (30.000 fps)\n\t\tSize: Discrete 1280x720\n\t\t\tInterval: Discrete 0.017s (60.000 fps)\n\t[1]: 'YUYV' (YUYV 4:2:2)\n\t\tSize: Discrete 1920x1080\n\t\t\tInterval: Discrete 0.200s (5.000 fps)\n\t\tSize: Discrete 1280x720\n\t\t\tInterval: Discrete 0.100s (10.000 fps)\n";
+        let modes = parse_modes(text);
+        assert_eq!(modes.len(), 4);
+        assert_eq!(
+            choose_mode(&modes),
+            Some(Mode {
+                format: "mjpeg".into(),
+                width: 1280,
+                height: 720,
+                fps: 60.0
+            })
+        );
+        let usb3 = "\t[0]: 'MJPG' (Motion-JPEG, compressed)\n\t\tSize: Discrete 1920x1080\n\t\t\tInterval: Discrete 0.017s (60.000 fps)\n\t[1]: 'NV12' (Y/UV 4:2:0)\n\t\tSize: Discrete 1920x1080\n\t\t\tInterval: Discrete 0.017s (60.000 fps)\n\t\tSize: Discrete 3840x2160\n\t\t\tInterval: Discrete 0.033s (30.000 fps)\n";
+        assert_eq!(
+            choose_mode(&parse_modes(usb3)),
+            Some(Mode {
+                format: "nv12".into(),
+                width: 1920,
+                height: 1080,
+                fps: 60.0
+            })
+        );
+    }
 
     #[test]
     fn reads_sound_cards() {

@@ -11,7 +11,7 @@ ARG TARGETARCH
 # ffmpeg encodes a capture card's picture; the VA-API drivers let it use the
 # NAS's graphics chip (Intel, AMD) for that.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg mesa-va-drivers \
+ && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg v4l-utils mesa-va-drivers \
  && if [ "${TARGETARCH:-amd64}" = "amd64" ]; then apt-get install -y --no-install-recommends intel-media-va-driver i965-va-driver; fi \
  && rm -rf /var/lib/apt/lists/*
 
