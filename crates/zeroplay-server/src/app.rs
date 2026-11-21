@@ -146,6 +146,10 @@ pub struct App {
     capture_audio: AtomicBool,
     /// What the capture card is doing (or why it is not), for the admin.
     capture_note: Mutex<Option<String>>,
+    /// Card modes per device that did not deliver their frame rate.
+    capture_skip: Mutex<HashMap<String, Vec<String>>>,
+    /// Bumped by every capture start, so an old check leaves a new one alone.
+    capture_runs: AtomicU64,
     updates: broadcast::Sender<()>,
     pub playit: Arc<Playit>,
     pub access: Access,
@@ -200,6 +204,8 @@ impl App {
             capture_video: AtomicBool::new(false),
             capture_audio: AtomicBool::new(false),
             capture_note: Mutex::new(None),
+            capture_skip: Mutex::new(HashMap::new()),
+            capture_runs: AtomicU64::new(0),
             updates,
             playit,
             access,
@@ -776,8 +782,16 @@ impl App {
 
     /// Starts (or restarts) the capture card at `quality`. If it does not
     /// work, the Xbox's own remote play picture is used instead.
-    async fn start_capture(&self, quality: Quality) {
+    fn start_capture(
+        self: &Arc<Self>,
+        quality: Quality,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.start_capture_now(quality))
+    }
+
+    async fn start_capture_now(self: &Arc<Self>, quality: Quality) {
         self.stop_capture();
+        let run = self.capture_runs.fetch_add(1, Ordering::SeqCst) + 1;
         let settings = self.access.settings().capture;
         let Some(device) = settings.device.clone() else {
             return;
@@ -794,50 +808,100 @@ impl App {
                 .map(|a| a.id),
             Some(id) => Some(id.to_owned()),
         };
-        let note =
-            match crate::capture::start(&device, audio.as_deref(), quality, self.media.clone())
-                .await
-            {
-                Ok(capture) => {
-                    let note = format!(
-                        "Picture from {} ({}), encoded on the {}. Sound from {}.",
-                        card_name.as_deref().unwrap_or("the capture card"),
-                        device,
-                        capture.encoder,
-                        if capture.sound {
-                            "the capture card"
-                        } else {
-                            "the Xbox"
+        let skip = self
+            .capture_skip
+            .lock()
+            .unwrap()
+            .get(&device)
+            .cloned()
+            .unwrap_or_default();
+        let note = match crate::capture::start(
+            &device,
+            audio.as_deref(),
+            quality,
+            self.media.clone(),
+            &skip,
+        )
+        .await
+        {
+            Ok(capture) => {
+                let mut note = format!(
+                    "Picture from {} ({}), encoded on the {}.",
+                    card_name.as_deref().unwrap_or("the capture card"),
+                    device,
+                    capture.encoder,
+                );
+                if let Some(why) = &capture.gpu_error {
+                    note.push_str(&format!(
+                        " The graphics chip did not work ({why}), so the processor encodes."
+                    ));
+                }
+                note.push_str(if capture.sound {
+                    " Sound from the capture card."
+                } else {
+                    " Sound from the Xbox."
+                });
+                if let Some(why) = &capture.sound_error {
+                    note.push_str(&format!(" The card's sound did not work ({why})."));
+                }
+                if !skip.is_empty() {
+                    note.push_str(&format!(
+                        " Left out card modes that did not deliver their frame rate: {}.",
+                        skip.join(", ")
+                    ));
+                }
+                // Check the card really delivers the frame rate it promised;
+                // cheap cards send many empty frames in some modes.
+                if let Some(key) = capture.mode_key.clone() {
+                    let expected = capture.expected_fps;
+                    let fps = capture.fps.clone();
+                    let app = self.clone();
+                    let device = device.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+                        if app.capture_runs.load(Ordering::SeqCst) != run {
+                            return;
                         }
+                        let got = fps.load(Ordering::Relaxed) as f64;
+                        if expected > 0.0 && got < expected * 0.75 {
+                            println!("[capture] {key} gives {got} of {expected} fps; trying another mode");
+                            app.capture_skip
+                                .lock()
+                                .unwrap()
+                                .entry(device)
+                                .or_default()
+                                .push(key);
+                            app.start_capture(quality).await;
+                        }
+                    });
+                }
+                self.capture_video.store(true, Ordering::Relaxed);
+                self.capture_audio.store(capture.sound, Ordering::Relaxed);
+                *self.capture.lock().unwrap() = Some(capture);
+                self.request_keyframe();
+                note
+            }
+            Err(error) => {
+                let message = format!("{error:#} The Xbox's remote play picture is used instead.");
+                let watchers: Vec<u64> = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .watchers
+                    .iter()
+                    .copied()
+                    .collect();
+                for viewer in watchers {
+                    self.send_direct(
+                        viewer,
+                        Direct::Error {
+                            message: message.clone(),
+                        },
                     );
-                    self.capture_video.store(true, Ordering::Relaxed);
-                    self.capture_audio.store(capture.sound, Ordering::Relaxed);
-                    *self.capture.lock().unwrap() = Some(capture);
-                    self.request_keyframe();
-                    note
                 }
-                Err(error) => {
-                    let message =
-                        format!("{error:#} The Xbox's remote play picture is used instead.");
-                    let watchers: Vec<u64> = self
-                        .inner
-                        .lock()
-                        .unwrap()
-                        .watchers
-                        .iter()
-                        .copied()
-                        .collect();
-                    for viewer in watchers {
-                        self.send_direct(
-                            viewer,
-                            Direct::Error {
-                                message: message.clone(),
-                            },
-                        );
-                    }
-                    message
-                }
-            };
+                message
+            }
+        };
         *self.capture_note.lock().unwrap() = Some(note);
         self.changed();
     }

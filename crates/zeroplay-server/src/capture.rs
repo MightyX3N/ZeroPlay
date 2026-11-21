@@ -255,6 +255,13 @@ struct Mode {
 }
 
 impl Mode {
+    fn key(&self) -> String {
+        format!(
+            "{}x{} {} {}",
+            self.width, self.height, self.format, self.fps
+        )
+    }
+
     fn raw(&self) -> bool {
         self.format != "mjpeg"
     }
@@ -379,6 +386,9 @@ fn video_settings(quality: Quality) -> (u32, bool) {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Encoder {
     Gpu,
+    /// The graphics chip's low-power encoder (VDENC): newer Intel chips only
+    /// have this one for H.264.
+    GpuLowPower,
     Cpu,
 }
 
@@ -390,13 +400,14 @@ fn ffmpeg_args(
     quality: Quality,
     video_port: u16,
     audio_port: u16,
+    preset: &str,
 ) -> Vec<String> {
     let (kbps, small) = video_settings(quality);
     let mut args: Vec<String> = ["-hide_banner", "-loglevel", "warning", "-nostdin"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    if encoder == Encoder::Gpu {
+    if encoder != Encoder::Cpu {
         args.extend([
             "-vaapi_device".into(),
             gpu().unwrap_or("/dev/dri/renderD128").into(),
@@ -432,7 +443,10 @@ fn ffmpeg_args(
     let rate = format!("{kbps}k");
     let buffer = format!("{}k", kbps / 2);
     match encoder {
-        Encoder::Gpu => {
+        Encoder::Gpu | Encoder::GpuLowPower => {
+            if encoder == Encoder::GpuLowPower {
+                args.extend(["-low_power".into(), "1".into()]);
+            }
             let filter = if small {
                 "format=nv12,hwupload,scale_vaapi=w=1280:h=720"
             } else {
@@ -468,7 +482,7 @@ fn ffmpeg_args(
                     "-c:v",
                     "libx264",
                     "-preset",
-                    "ultrafast",
+                    preset,
                     "-tune",
                     "zerolatency",
                     "-profile:v",
@@ -543,6 +557,13 @@ pub struct Capture {
     pub fps: Arc<AtomicU32>,
     /// What the card is asked to send, e.g. "1920x1080 mjpeg".
     pub input: String,
+    /// Why the graphics chip was not used, when it was tried.
+    pub gpu_error: Option<String>,
+    /// Why the card's sound is not used, when it was asked for.
+    pub sound_error: Option<String>,
+    /// The card mode in use ("1920x1080 mjpeg 60") and its promised frame rate.
+    pub mode_key: Option<String>,
+    pub expected_fps: f64,
 }
 
 impl Drop for Capture {
@@ -677,6 +698,7 @@ pub async fn start(
     audio: Option<&str>,
     quality: Quality,
     media: broadcast::Sender<MediaPacket>,
+    skip: &[String],
 ) -> Result<Capture> {
     check_access(device)?;
     let mut input: Vec<String> = [
@@ -692,8 +714,23 @@ pub async fn start(
     .collect();
     // The modes the card really has (with frame rates); else a guess from
     // ffmpeg's list of formats.
-    let modes = card_modes(device).await;
-    let described = if let Some(mode) = choose_mode(&modes) {
+    let all_modes = card_modes(device).await;
+    // Modes that turned out not to deliver their frame rate are left out.
+    let modes: Vec<Mode> = all_modes
+        .iter()
+        .filter(|m| !skip.contains(&m.key()))
+        .cloned()
+        .collect();
+    let chosen = choose_mode(&modes);
+    // The processor's encoder gets a better (slower) setting when there are
+    // fewer pixels a second to encode.
+    let preset = match &chosen {
+        Some(m) if (m.width as f64 * m.height as f64 * m.fps) <= 1920.0 * 1080.0 * 31.0 => {
+            "veryfast"
+        }
+        _ => "superfast",
+    };
+    let described = if let Some(mode) = chosen.clone() {
         println!("[capture] card modes: {modes:?}");
         input.extend([
             "-input_format".into(),
@@ -724,8 +761,10 @@ pub async fn start(
         }
     };
     input.extend(["-i".into(), device.to_owned()]);
-    let mut capture = start_with_input(&input, audio, quality, media).await?;
+    let mut capture = start_with_input(&input, audio, quality, media, preset).await?;
     capture.input = described;
+    capture.mode_key = chosen.as_ref().map(Mode::key);
+    capture.expected_fps = chosen.map(|m| m.fps).unwrap_or(0.0);
     Ok(capture)
 }
 
@@ -734,13 +773,15 @@ async fn start_with_input(
     audio: Option<&str>,
     quality: Quality,
     media: broadcast::Sender<MediaPacket>,
+    preset: &str,
 ) -> Result<Capture> {
     let encoders: Vec<Encoder> = if gpu().is_some() {
-        vec![Encoder::Gpu, Encoder::Cpu]
+        vec![Encoder::Gpu, Encoder::GpuLowPower, Encoder::Cpu]
     } else {
         vec![Encoder::Cpu]
     };
     let mut last_error = String::new();
+    let mut gpu_error: Option<String> = None;
     for encoder in encoders {
         let video_socket = UdpSocket::bind("127.0.0.1:0").await?;
         let audio_socket = UdpSocket::bind("127.0.0.1:0").await?;
@@ -751,6 +792,7 @@ async fn start_with_input(
             quality,
             video_socket.local_addr()?.port(),
             audio_socket.local_addr()?.port(),
+            preset,
         );
         let mut child = Command::new("ffmpeg")
             .args(&args)
@@ -773,8 +815,13 @@ async fn start_with_input(
         }
         // Working means video packets arrive within a few seconds.
         let mut probe = [0u8; 2048];
-        let first =
-            tokio::time::timeout(Duration::from_secs(8), video_socket.peek_from(&mut probe)).await;
+        // A picture packet, or ffmpeg giving up (then the next encoder is tried at once).
+        let first = tokio::select! {
+            got = tokio::time::timeout(Duration::from_secs(8), video_socket.peek_from(&mut probe)) => got,
+            _ = child.wait() => Ok(Err(std::io::Error::other("ffmpeg stopped"))),
+        };
+        // Let the last lines of a stopped ffmpeg arrive.
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let mut said = Vec::new();
         while let Ok(line) = lines_rx.try_recv() {
             said.push(line);
@@ -782,7 +829,7 @@ async fn start_with_input(
         match (first, child.try_wait()) {
             (Ok(Ok(_)), Ok(None)) => {
                 let name = match encoder {
-                    Encoder::Gpu => "graphics chip",
+                    Encoder::Gpu | Encoder::GpuLowPower => "graphics chip",
                     Encoder::Cpu => "processor",
                 };
                 println!("[capture] running, encoding on the {name}");
@@ -794,6 +841,10 @@ async fn start_with_input(
                     sound: false,
                     fps,
                     input: String::new(),
+                    gpu_error: gpu_error.clone(),
+                    sound_error: None,
+                    mode_key: None,
+                    expected_fps: 0.0,
                 };
                 // Sound runs on its own: one ffmpeg reading both the card's
                 // picture and its sound waits on the slower of the two, and
@@ -805,7 +856,10 @@ async fn start_with_input(
                             capture.tasks.push(task);
                             capture.sound = true;
                         }
-                        Err(error) => println!("[capture] no sound from the card: {error:#}"),
+                        Err(error) => {
+                            println!("[capture] no sound from the card: {error:#}");
+                            capture.sound_error = Some(format!("{error:#}"));
+                        }
                     }
                 }
                 return Ok(capture);
@@ -819,6 +873,9 @@ async fn start_with_input(
                     .cloned()
                     .unwrap_or_else(|| "no picture from the capture card".to_owned());
                 println!("[capture] {encoder:?} encoder did not work: {last_error}");
+                if encoder != Encoder::Cpu {
+                    gpu_error = Some(last_error.clone());
+                }
             }
         }
     }
@@ -903,7 +960,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let capture = start_with_input(&input, None, Quality::Low, media)
+        let capture = start_with_input(&input, None, Quality::Low, media, "ultrafast")
             .await
             .unwrap();
         // The first whole key frame carries its picture settings (SPS, NAL type 7).
