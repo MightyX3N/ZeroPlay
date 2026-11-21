@@ -166,6 +166,7 @@ function renderCapture(s) {
   const lines = [];
   if (c.device) lines.push(c.gpu ? "Encoding on the graphics chip." : "No graphics chip visible to ZeroPlay, so the processor encodes (uses more of it).");
   if (c.note) lines.push(c.note);
+  if (c.active && c.input) lines.push(`The card sends ${c.input}. Right now: ${c.fps ?? 0} frames a second.`);
   $("cap-note").textContent = lines.join(" ");
   show($("cap-help"), c.devices.length === 0 || c.devices.some((d) => !d.reachable));
 }

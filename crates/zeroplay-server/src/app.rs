@@ -232,6 +232,10 @@ impl App {
             loop {
                 every.tick().await;
                 ticker.tick().await;
+                // Keep the admin's capture frame rate current.
+                if ticker.capture.lock().unwrap().is_some() {
+                    ticker.changed();
+                }
             }
         });
         if signed_in {
@@ -873,6 +877,8 @@ impl App {
             "device": settings.device,
             "audioChoice": settings.audio,
             "active": self.capture.lock().unwrap().is_some(),
+            "fps": self.capture.lock().unwrap().as_ref().map(|c| c.fps.load(Ordering::Relaxed)),
+            "input": self.capture.lock().unwrap().as_ref().map(|c| c.input.clone()),
             "note": self.capture_note.lock().unwrap().clone(),
         })
     }

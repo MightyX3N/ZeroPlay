@@ -8,6 +8,8 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -214,8 +216,10 @@ fn parse_formats(text: &str) -> Vec<Format> {
     out
 }
 
-/// The input to ask the card for: 1080p, uncompressed if offered (the
-/// cleanest), else MJPEG; else the largest size it has.
+/// The input to ask the card for: 1080p MJPEG when the card offers it, else
+/// 1080p uncompressed; else the largest size it has. Cards that offer both
+/// are usually on USB 2, where uncompressed 1080p runs at about 5 frames a
+/// second; cards that only send uncompressed (USB 3) do 60.
 fn choose_format(formats: &[Format]) -> Option<(String, (u32, u32))> {
     let usable = |f: &&Format| {
         matches!(
@@ -231,7 +235,7 @@ fn choose_format(formats: &[Format]) -> Option<(String, (u32, u32))> {
             .find(|f| f.raw == raw && f.sizes.contains(&full))
             .map(|f| (f.name.clone(), full))
     };
-    with_full(true).or_else(|| with_full(false)).or_else(|| {
+    with_full(false).or_else(|| with_full(true)).or_else(|| {
         formats
             .iter()
             .filter(usable)
@@ -355,7 +359,7 @@ fn ffmpeg_args(
                     "-c:v",
                     "libx264",
                     "-preset",
-                    "superfast",
+                    "ultrafast",
                     "-tune",
                     "zerolatency",
                     "-profile:v",
@@ -426,6 +430,10 @@ pub struct Capture {
     pub encoder: &'static str,
     /// Sound comes from the card (else the Xbox's sound is used).
     pub sound: bool,
+    /// Frames a second leaving the encoder right now.
+    pub fps: Arc<AtomicU32>,
+    /// What the card is asked to send, e.g. "1920x1080 mjpeg".
+    pub input: String,
 }
 
 impl Drop for Capture {
@@ -506,7 +514,10 @@ async fn start_sound(
     }
     let mut probe = [0u8; 2048];
     match tokio::time::timeout(Duration::from_secs(5), socket.peek_from(&mut probe)).await {
-        Ok(Ok(_)) => Ok((child, pump(socket, media, false))),
+        Ok(Ok(_)) => Ok((
+            child,
+            pump(socket, media, false, Arc::new(AtomicU32::new(0))),
+        )),
         _ => {
             let _ = child.start_kill();
             bail!("no sound packets from {card}")
@@ -515,15 +526,31 @@ async fn start_sound(
 }
 
 /// Reads RTP from a local port into the media channel.
-fn pump(socket: UdpSocket, media: broadcast::Sender<MediaPacket>, video: bool) -> JoinHandle<()> {
+/// Counts whole frames (RTP marker bits) into `fps`, once a second.
+fn pump(
+    socket: UdpSocket,
+    media: broadcast::Sender<MediaPacket>,
+    video: bool,
+    fps: Arc<AtomicU32>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = vec![0u8; 2048];
+        let mut frames = 0u32;
+        let mut since = std::time::Instant::now();
         loop {
             let Ok(n) = socket.recv(&mut buf).await else {
                 return;
             };
             let mut bytes = &buf[..n];
             if let Ok(packet) = rtc::rtp::packet::Packet::unmarshal(&mut bytes) {
+                if packet.header.marker {
+                    frames += 1;
+                }
+                if since.elapsed() >= Duration::from_secs(1) {
+                    fps.store(frames, Ordering::Relaxed);
+                    frames = 0;
+                    since = std::time::Instant::now();
+                }
                 let _ = media.send(if video {
                     MediaPacket::Video(packet)
                 } else {
@@ -566,7 +593,11 @@ pub async fn start(
         ]);
     }
     input.extend(["-i".into(), device.to_owned()]);
-    start_with_input(&input, audio, quality, media).await
+    let mut capture = start_with_input(&input, audio, quality, media).await?;
+    capture.input = choose_format(&formats)
+        .map(|(f, (w, h))| format!("{w}x{h} {f}"))
+        .unwrap_or_else(|| "the card's default format".to_owned());
+    Ok(capture)
 }
 
 async fn start_with_input(
@@ -626,11 +657,14 @@ async fn start_with_input(
                     Encoder::Cpu => "processor",
                 };
                 println!("[capture] running, encoding on the {name}");
+                let fps = Arc::new(AtomicU32::new(0));
                 let mut capture = Capture {
                     children: vec![child],
-                    tasks: vec![pump(video_socket, media.clone(), true)],
+                    tasks: vec![pump(video_socket, media.clone(), true, fps.clone())],
                     encoder: name,
                     sound: false,
+                    fps,
+                    input: String::new(),
                 };
                 // Sound runs on its own: one ffmpeg reading both the card's
                 // picture and its sound waits on the slower of the two, and
@@ -677,14 +711,20 @@ mod tests {
     }
 
     #[test]
-    fn picks_raw_1080p_then_mjpeg() {
+    fn picks_mjpeg_1080p_then_raw() {
         let text = "[video4linux2,v4l2 @ 0x1] Compressed:       mjpeg :          Motion-JPEG : 1920x1080 1280x720\n[video4linux2,v4l2 @ 0x1] Raw       :     yuyv422 :           YUYV 4:2:2 : 1920x1080 1280x720\n";
         let formats = parse_formats(text);
         assert_eq!(formats.len(), 2);
         assert_eq!(formats[0].name, "mjpeg");
         assert_eq!(
             choose_format(&formats),
-            Some(("yuyv422".to_owned(), (1920, 1080)))
+            Some(("mjpeg".to_owned(), (1920, 1080)))
+        );
+        let raw_only =
+            "[v4l2 @ 0x1] Raw       :        nv12 :         Y/CbCr 4:2:0 : 1920x1080 3840x2160\n";
+        assert_eq!(
+            choose_format(&parse_formats(raw_only)),
+            Some(("nv12".to_owned(), (1920, 1080)))
         );
         let only_small_raw = "[v4l2 @ 0x1] Compressed:       mjpeg :          Motion-JPEG : 1920x1080\n[v4l2 @ 0x1] Raw       :     yuyv422 :           YUYV 4:2:2 : 1280x720\n";
         assert_eq!(
