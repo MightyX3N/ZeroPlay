@@ -163,6 +163,8 @@ function renderCapture(s) {
     ...c.audio.map((a) => option(a.id, `Sound card: ${a.name}`)));
   $("cap-audio").value = c.audioChoice || "";
   $("cap-audio").disabled = !c.device;
+  $("cap-sharp").value = c.sharp ? "1" : "";
+  $("cap-sharp").disabled = !c.device;
   const lines = [];
   if (c.device && !c.active && !c.gpu) lines.push("No graphics chip visible to ZeroPlay, so the processor encodes (uses more of it).");
   if (c.note) lines.push(c.note);
@@ -171,13 +173,14 @@ function renderCapture(s) {
   show($("cap-help"), c.devices.length === 0 || c.devices.some((d) => !d.reachable));
 }
 
-const sendCapture = () => send({ t: "adminCapture", device: $("cap-device").value || null, audio: $("cap-device").value ? ($("cap-audio").value || null) : null });
+const sendCapture = () => send({ t: "adminCapture", device: $("cap-device").value || null, audio: $("cap-device").value ? ($("cap-audio").value || null) : null, sharp: $("cap-sharp").value === "1" });
 $("cap-device").onchange = () => {
   // Picking a card takes its sound too, unless chosen otherwise.
   if ($("cap-device").value && !$("cap-audio").value) $("cap-audio").value = "auto";
   sendCapture();
 };
 $("cap-audio").onchange = sendCapture;
+$("cap-sharp").onchange = sendCapture;
 
 function renderProfiles(s) {
   const admin = s && s.admin;

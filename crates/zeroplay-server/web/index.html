@@ -180,6 +180,12 @@
     <label class="field">Sound
       <select id="cap-audio"></select>
     </label>
+    <label class="field">Frame rate
+      <select id="cap-sharp">
+        <option value="">60 fps – smoother</option>
+        <option value="1">30 fps – sharper (up to 4K)</option>
+      </select>
+    </label>
     <p id="cap-note" class="muted small"></p>
     <div id="cap-help" class="muted small hidden">
       <p>ZeroPlay's container needs access to capture cards. Plug in a capture card that works like a webcam, and add these lines under <code>zeroplay:</code> in its compose file (they are in the repo's compose file), then recreate the container:</p>

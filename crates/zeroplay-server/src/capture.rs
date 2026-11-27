@@ -31,6 +31,9 @@ pub struct CaptureSettings {
     pub device: Option<String>,
     /// ALSA card id for sound; `None` = the Xbox's remote play sound.
     pub audio: Option<String>,
+    /// Prefer the sharpest picture (e.g. 4K at 30 fps) over 60 fps.
+    #[serde(default)]
+    pub sharp: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -441,7 +444,9 @@ fn parse_modes(text: &str) -> Vec<Mode> {
 
 /// The best real mode for games: smooth first (50+ fps, then 25+), then the
 /// biggest picture up to 1080p, then uncompressed over MJPEG.
-fn choose_mode(modes: &[Mode]) -> Option<Mode> {
+/// With `sharp`, the biggest picture wins as long as it has at least 24 fps
+/// (4K30 over 1440p60).
+fn choose_mode(modes: &[Mode], sharp: bool) -> Option<Mode> {
     let bucket = |fps: f64| {
         if fps >= 49.0 {
             2
@@ -458,7 +463,11 @@ fn choose_mode(modes: &[Mode]) -> Option<Mode> {
     let key = |m: &Mode| {
         (
             m.height >= 720,
-            bucket(m.fps),
+            if sharp {
+                bucket(m.fps).min(1)
+            } else {
+                bucket(m.fps)
+            },
             m.width * m.height,
             m.raw(),
             10_000 - ((m.fps - 60.0).abs() * 100.0).min(10_000.0) as u32,
@@ -847,6 +856,7 @@ pub async fn start(
     quality: Quality,
     media: broadcast::Sender<MediaPacket>,
     skip: &[String],
+    sharp: bool,
 ) -> Result<Capture> {
     check_access(device)?;
     let mut input: Vec<String> = [
@@ -877,7 +887,7 @@ pub async fn start(
         .filter(|m| !skip.contains(&m.key()))
         .cloned()
         .collect();
-    let chosen = choose_mode(&modes);
+    let chosen = choose_mode(&modes, sharp);
     // The processor's encoder gets a better (slower) setting when there are
     // fewer pixels a second to encode.
     let preset = match &chosen {
@@ -1086,13 +1096,30 @@ mod tests {
             m(1920, 1080, 60.0),
             m(3840, 2160, 30.0),
         ];
-        assert_eq!(choose_mode(&modes), Some(m(1920, 1080, 60.0)));
+        assert_eq!(choose_mode(&modes, false), Some(m(1920, 1080, 60.0)));
         let with_4k60 = vec![
             m(1920, 1080, 120.0),
             m(3840, 2160, 60.0),
             m(3840, 2160, 30.0),
         ];
-        assert_eq!(choose_mode(&with_4k60), Some(m(3840, 2160, 60.0)));
+        assert_eq!(choose_mode(&with_4k60, false), Some(m(3840, 2160, 60.0)));
+    }
+
+    #[test]
+    fn sharp_picks_4k30() {
+        let m = |w: u32, h: u32, fps: f64| Mode {
+            format: "nv12".into(),
+            width: w,
+            height: h,
+            fps,
+        };
+        let modes = vec![
+            m(3840, 2160, 30.0),
+            m(2560, 1440, 60.0),
+            m(1920, 1080, 120.0),
+        ];
+        assert_eq!(choose_mode(&modes, true), Some(m(3840, 2160, 30.0)));
+        assert_eq!(choose_mode(&modes, false), Some(m(2560, 1440, 60.0)));
     }
 
     #[test]
@@ -1131,8 +1158,11 @@ mod tests {
                 fps: 60.0,
             },
         ];
-        assert_eq!(choose_mode(&modes).map(|m| m.height), Some(720));
-        assert_eq!(choose_mode(&modes[..2]).map(|m| m.height), Some(1080));
+        assert_eq!(choose_mode(&modes, false).map(|m| m.height), Some(720));
+        assert_eq!(
+            choose_mode(&modes[..2], false).map(|m| m.height),
+            Some(1080)
+        );
     }
 
     #[test]
@@ -1141,7 +1171,7 @@ mod tests {
         let modes = parse_modes(text);
         assert_eq!(modes.len(), 4);
         assert_eq!(
-            choose_mode(&modes),
+            choose_mode(&modes, false),
             Some(Mode {
                 format: "mjpeg".into(),
                 width: 1280,
@@ -1151,7 +1181,7 @@ mod tests {
         );
         let usb3 = "\t[0]: 'MJPG' (Motion-JPEG, compressed)\n\t\tSize: Discrete 1920x1080\n\t\t\tInterval: Discrete 0.017s (60.000 fps)\n\t[1]: 'NV12' (Y/UV 4:2:0)\n\t\tSize: Discrete 1920x1080\n\t\t\tInterval: Discrete 0.017s (60.000 fps)\n\t\tSize: Discrete 3840x2160\n\t\t\tInterval: Discrete 0.033s (30.000 fps)\n";
         assert_eq!(
-            choose_mode(&parse_modes(usb3)),
+            choose_mode(&parse_modes(usb3), false),
             Some(Mode {
                 format: "nv12".into(),
                 width: 1920,

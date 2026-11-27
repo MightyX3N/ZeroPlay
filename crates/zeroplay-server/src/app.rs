@@ -824,6 +824,7 @@ impl App {
             quality,
             self.media.clone(),
             &skip,
+            settings.sharp,
         )
         .await
         {
@@ -926,13 +927,23 @@ impl App {
         self: &Arc<Self>,
         settings: crate::capture::CaptureSettings,
     ) -> Result<()> {
+        let before = self.access.settings().capture;
+        let only_frame_rate = before.device == settings.device && before.audio == settings.audio;
         self.access.set_capture(settings).await?;
         *self.capture_note.lock().unwrap() = None;
-        let live = match &self.inner.lock().unwrap().stream {
-            StreamState::Live { console_id, .. } => Some(console_id.clone()),
-            _ => None,
+        let (live, quality) = {
+            let inner = self.inner.lock().unwrap();
+            let live = match &inner.stream {
+                StreamState::Live { console_id, .. } => Some(console_id.clone()),
+                _ => None,
+            };
+            (live, inner.stream_quality.unwrap_or_default())
         };
-        if let Some(console_id) = live {
+        // Only the frame-rate choice changed: restart the encoder, not the Xbox.
+        if live.is_some() && only_frame_rate && self.capture.lock().unwrap().is_some() {
+            let app = self.clone();
+            tokio::spawn(async move { app.start_capture(quality).await });
+        } else if let Some(console_id) = live {
             self.stop_capture();
             self.restart_stream(console_id, "Switching picture source");
         }
@@ -949,6 +960,7 @@ impl App {
             "gpu": crate::capture::gpu().is_some(),
             "device": settings.device,
             "audioChoice": settings.audio,
+            "sharp": settings.sharp,
             "active": self.capture.lock().unwrap().is_some(),
             "fps": self.capture.lock().unwrap().as_ref().map(|c| c.fps.load(Ordering::Relaxed)),
             "input": self.capture.lock().unwrap().as_ref().map(|c| c.input.clone()),

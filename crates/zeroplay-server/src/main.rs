@@ -331,6 +331,8 @@ enum FromPage {
     AdminCapture {
         device: Option<String>,
         audio: Option<String>,
+        #[serde(default)]
+        sharp: bool,
     },
     /// The shared stream quality.
     Quality {
@@ -570,12 +572,20 @@ async fn handle(
         FromPage::Turns { on } => app.set_turns(id, on),
         FromPage::RequestTime => return app.request_time(id),
         FromPage::Quality { quality } => return app.set_quality(id, quality).await,
-        FromPage::AdminCapture { device, audio } => {
+        FromPage::AdminCapture {
+            device,
+            audio,
+            sharp,
+        } => {
             if !is_admin(app, id) {
                 return error("Only an admin can change this.".to_owned());
             }
             if let Err(e) = app
-                .set_capture(capture::CaptureSettings { device, audio })
+                .set_capture(capture::CaptureSettings {
+                    device,
+                    audio,
+                    sharp,
+                })
                 .await
             {
                 return error(format!("{e:#}"));
