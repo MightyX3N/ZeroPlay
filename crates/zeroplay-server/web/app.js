@@ -555,7 +555,7 @@ function renderGames(s, current) {
     return tile;
   };
   // The dock: the most recently played games, as many as fit; the rest below.
-  $("game-tiles").replaceChildren(...games.slice(0, cols).map((g) => card(g, false)));
+  $("game-tiles").replaceChildren(...games.slice(0, cols).map((g) => card(g, true)));
   $("game-grid").replaceChildren(...games.slice(cols).map((g) => card(g, true)));
   show($("games-more"), games.length > cols);
 }
@@ -566,10 +566,21 @@ function homeCols() {
   const style = getComputedStyle(probe);
   const tile = (probe.offsetWidth - (parseFloat(style.paddingLeft) || 0)) || 200;
   const gap = parseFloat(style.marginRight) || 20;
-  const side = parseFloat(style.paddingLeft) || 20;
   const width = $("home").clientWidth || window.innerWidth;
-  const cols = Math.max(2, Math.floor((width - 2 * side + gap) / (tile + gap)));
-  $("home").style.setProperty("--cols", cols);
+  // As many cards as fit in the dock with a quarter of a card free at each end (room for
+  // the focused card to grow 1.2x); then the cards are widened so the row fills the dock.
+  // The grid below uses the same size, so its columns line up with the dock's.
+  const inset = parseFloat(getComputedStyle($("games-shelf")).marginLeft) || 0;
+  const inner = width - 2 * inset - 2;
+  const size = (n) => (inner - (n - 1) * gap) / (n + 0.5);
+  let cols = 2;
+  while (size(cols + 1) >= tile * 0.92) cols++;
+  const fitted = size(cols);
+  const home = $("home").style;
+  home.setProperty("--cols", cols);
+  home.setProperty("--tile-w", `${fitted}px`);
+  home.setProperty("--tile-h", `${fitted * 3 / 5}px`);
+  home.setProperty("--radius", `${fitted * 0.071}px`);
   return cols;
 }
 
