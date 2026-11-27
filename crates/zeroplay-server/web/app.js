@@ -881,7 +881,7 @@ const menuItems = () => [...document.querySelectorAll("#menu .menu-item")];
 // Shared quality: one setting for everyone, each player limited to their
 // profile's maximum. Changing it restarts the stream for a few seconds.
 const QUALITIES = ["max", "high", "medium", "low"];
-const QUALITY_NAMES = { max: "Max (1080p)", high: "High (1080p)", medium: "Medium (720p)", low: "Low (720p)" };
+const QUALITY_NAMES = { max: "Max", high: "High (1080p)", medium: "Medium (720p)", low: "Low (720p)" };
 
 function allowedQualities() {
   const q = (status && status.quality) || {};

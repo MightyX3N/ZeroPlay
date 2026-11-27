@@ -451,23 +451,23 @@ fn choose_mode(modes: &[Mode]) -> Option<Mode> {
             0
         }
     };
+    // HD first (an SD mode like 720x576 looks blurry however smooth it is),
+    // then smooth (50+ fps), then the biggest picture up to 4K, then
+    // uncompressed, then the frame rate nearest 60 (120 doubles the work and
+    // halves each frame's share of the bitrate, for screens that show 60).
+    let key = |m: &Mode| {
+        (
+            m.height >= 720,
+            bucket(m.fps),
+            m.width * m.height,
+            m.raw(),
+            10_000 - ((m.fps - 60.0).abs() * 100.0).min(10_000.0) as u32,
+        )
+    };
     modes
         .iter()
-        .filter(|m| m.height <= 1080)
-        .max_by(|a, b| {
-            (
-                bucket(a.fps),
-                a.width * a.height,
-                a.raw(),
-                (a.fps * 100.0) as u32,
-            )
-                .cmp(&(
-                    bucket(b.fps),
-                    b.width * b.height,
-                    b.raw(),
-                    (b.fps * 100.0) as u32,
-                ))
-        })
+        .filter(|m| m.height <= 2160)
+        .max_by(|a, b| key(a).cmp(&key(b)))
         .cloned()
 }
 
@@ -504,13 +504,26 @@ async fn card_formats(device: &str) -> Vec<Format> {
 }
 
 /// Video bitrate per quality, in kbit/s, and whether to scale to 720p.
-fn video_settings(quality: Quality) -> (u32, bool) {
-    match quality {
-        Quality::Max => (20_000, false),
-        Quality::High => (12_000, false),
-        Quality::Medium => (6_000, true),
-        Quality::Low => (2_500, true),
-    }
+/// Video bitrate in kbit/s, and the size to scale down to (if the card's
+/// picture is bigger): Max keeps the card's picture (up to 4K), High is at
+/// most 1080p, Medium and Low 720p.
+fn video_settings(quality: Quality, source_height: u32) -> (u32, Option<(u32, u32)>) {
+    let cap = match quality {
+        Quality::Max => None,
+        Quality::High => Some((1920, 1080)),
+        Quality::Medium | Quality::Low => Some((1280, 720)),
+    };
+    let scale = cap.filter(|(_, h)| source_height > *h);
+    let height = scale.map(|(_, h)| h).unwrap_or(source_height);
+    let kbps = match quality {
+        Quality::Max if height >= 2160 => 40_000,
+        Quality::Max if height >= 1440 => 28_000,
+        Quality::Max => 20_000,
+        Quality::High => 12_000,
+        Quality::Medium => 6_000,
+        Quality::Low => 2_500,
+    };
+    (kbps, scale)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -531,8 +544,9 @@ fn ffmpeg_args(
     video_port: u16,
     audio_port: u16,
     preset: &str,
+    source_height: u32,
 ) -> Vec<String> {
-    let (kbps, small) = video_settings(quality);
+    let (kbps, scale) = video_settings(quality, source_height);
     let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin"]
         .iter()
         .map(|s| s.to_string())
@@ -577,15 +591,13 @@ fn ffmpeg_args(
             if encoder == Encoder::GpuLowPower {
                 args.extend(["-low_power".into(), "1".into()]);
             }
-            let filter = if small {
-                "format=nv12,hwupload,scale_vaapi=w=1280:h=720"
-            } else {
-                "format=nv12,hwupload"
+            let filter = match scale {
+                Some((w, h)) => format!("format=nv12,hwupload,scale_vaapi=w={w}:h={h}"),
+                None => "format=nv12,hwupload".to_owned(),
             };
+            args.extend(["-vf".into(), filter]);
             args.extend(
                 [
-                    "-vf",
-                    filter,
                     "-c:v",
                     "h264_vaapi",
                     "-profile:v",
@@ -604,8 +616,8 @@ fn ffmpeg_args(
             );
         }
         Encoder::Cpu => {
-            if small {
-                args.extend(["-vf".into(), "scale=1280:720".into()]);
+            if let Some((w, h)) = scale {
+                args.extend(["-vf".into(), format!("scale={w}:{h}")]);
             }
             args.extend(
                 [
@@ -693,6 +705,8 @@ pub struct Capture {
     pub sound_error: Option<String>,
     /// The card mode in use ("1920x1080 mjpeg 60") and its promised frame rate.
     pub mode_key: Option<String>,
+    /// Every mode the card lists, for the admin.
+    pub offers: String,
     pub expected_fps: f64,
 }
 
@@ -910,8 +924,15 @@ pub async fn start(
         }
     };
     input.extend(["-i".into(), device.to_owned()]);
-    let mut capture = start_with_input(&input, audio, quality, media, preset).await?;
+    let source_height = chosen.as_ref().map(|m| m.height).unwrap_or(1080);
+    let mut capture =
+        start_with_input(&input, audio, quality, media, preset, source_height).await?;
     capture.input = described;
+    capture.offers = all_modes
+        .iter()
+        .map(|m| format!("{}x{} {} {:.0}", m.width, m.height, m.format, m.fps))
+        .collect::<Vec<_>>()
+        .join(", ");
     capture.mode_key = chosen.as_ref().map(Mode::key);
     capture.expected_fps = chosen.map(|m| m.fps).unwrap_or(0.0);
     Ok(capture)
@@ -923,6 +944,7 @@ async fn start_with_input(
     quality: Quality,
     media: broadcast::Sender<MediaPacket>,
     preset: &str,
+    source_height: u32,
 ) -> Result<Capture> {
     let mut gpu_error: Option<String> = None;
     let mut driver: Option<&'static str> = None;
@@ -952,6 +974,7 @@ async fn start_with_input(
             video_socket.local_addr()?.port(),
             audio_socket.local_addr()?.port(),
             preset,
+            source_height,
         );
         let mut command = Command::new("ffmpeg");
         if let (Some(name), true) = (driver, encoder != Encoder::Cpu) {
@@ -1007,6 +1030,7 @@ async fn start_with_input(
                     gpu_error: gpu_error.clone(),
                     sound_error: None,
                     mode_key: None,
+                    offers: String::new(),
                     expected_fps: 0.0,
                 };
                 // Sound runs on its own: one ffmpeg reading both the card's
@@ -1048,6 +1072,68 @@ async fn start_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_4k60_and_60_over_120() {
+        let m = |w: u32, h: u32, fps: f64| Mode {
+            format: "nv12".into(),
+            width: w,
+            height: h,
+            fps,
+        };
+        let modes = vec![
+            m(1920, 1080, 120.0),
+            m(1920, 1080, 60.0),
+            m(3840, 2160, 30.0),
+        ];
+        assert_eq!(choose_mode(&modes), Some(m(1920, 1080, 60.0)));
+        let with_4k60 = vec![
+            m(1920, 1080, 120.0),
+            m(3840, 2160, 60.0),
+            m(3840, 2160, 30.0),
+        ];
+        assert_eq!(choose_mode(&with_4k60), Some(m(3840, 2160, 60.0)));
+    }
+
+    #[test]
+    fn quality_scales_a_4k_picture() {
+        assert_eq!(video_settings(Quality::Max, 2160), (40_000, None));
+        assert_eq!(
+            video_settings(Quality::High, 2160),
+            (12_000, Some((1920, 1080)))
+        );
+        assert_eq!(video_settings(Quality::High, 1080), (12_000, None));
+        assert_eq!(
+            video_settings(Quality::Low, 1080),
+            (2_500, Some((1280, 720)))
+        );
+    }
+
+    #[test]
+    fn prefers_hd_over_smooth_sd() {
+        let modes = vec![
+            Mode {
+                format: "yuyv422".into(),
+                width: 720,
+                height: 576,
+                fps: 50.0,
+            },
+            Mode {
+                format: "yuyv422".into(),
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+            },
+            Mode {
+                format: "mjpeg".into(),
+                width: 1280,
+                height: 720,
+                fps: 60.0,
+            },
+        ];
+        assert_eq!(choose_mode(&modes).map(|m| m.height), Some(720));
+        assert_eq!(choose_mode(&modes[..2]).map(|m| m.height), Some(1080));
+    }
 
     #[test]
     fn chooses_a_smooth_mode() {
@@ -1123,7 +1209,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let capture = start_with_input(&input, None, Quality::Low, media, "ultrafast")
+        let capture = start_with_input(&input, None, Quality::Low, media, "ultrafast", 720)
             .await
             .unwrap();
         // The first whole key frame carries its picture settings (SPS, NAL type 7).

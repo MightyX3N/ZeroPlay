@@ -850,6 +850,9 @@ impl App {
                 if let Some(why) = &capture.sound_error {
                     note.push_str(&format!(" The card's sound did not work ({why})."));
                 }
+                if !capture.offers.is_empty() {
+                    note.push_str(&format!(" The card offers: {}.", capture.offers));
+                }
                 if !skip.is_empty() {
                     note.push_str(&format!(
                         " Left out card modes that did not deliver their frame rate: {}.",
