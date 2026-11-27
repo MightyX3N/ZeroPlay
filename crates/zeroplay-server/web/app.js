@@ -588,13 +588,18 @@ function renderGames(s, current) {
 
 let gamesKey = "";
 let colsKey = "";
+let lastCols = 6;
 
 // How many cards fit in a row (6 on a 16:9 screen, as Korie), from the CSS sizes.
 function homeCols() {
   const probe = $("tile-probe");
   const style = getComputedStyle(probe);
-  const tile = (probe.offsetWidth - (parseFloat(style.paddingLeft) || 0)) || 200;
-  const gap = parseFloat(style.marginRight) || 20;
+  // While Home is hidden (a stream is on screen) nothing can be measured: keep
+  // the last layout instead of working one out from zeros.
+  if ($("home").classList.contains("hidden") || !probe.offsetWidth) return lastCols;
+  let tile = probe.offsetWidth - (parseFloat(style.paddingLeft) || 0);
+  if (!(tile > 40)) tile = 200;
+  const gap = Math.max(4, parseFloat(style.marginRight) || 20);
   const width = $("home").clientWidth || window.innerWidth;
   // As many cards as fit in the dock with a quarter of a card free at each end (room for
   // the focused card to grow 1.2x); then the cards are widened so the row fills the dock.
@@ -603,7 +608,8 @@ function homeCols() {
   const inner = width - 2 * inset - 2;
   const size = (n) => (inner - (n - 1) * gap) / (n + 0.5);
   let cols = 2;
-  while (size(cols + 1) >= tile * 0.92) cols++;
+  while (cols < 12 && size(cols + 1) >= tile * 0.92) cols++;
+  lastCols = cols;
   const fitted = size(cols);
   // Only when it changed: a new size makes the browser lay out and paint everything again.
   const sizes = `${cols}|${fitted}`;
