@@ -228,6 +228,64 @@ pub async fn title_art(
     Ok(art)
 }
 
+/// A title's name (game or app) from Xbox Live, by title id.
+pub async fn title_name(
+    http: &reqwest::Client,
+    token: &XboxToken,
+    title_id: u64,
+) -> Result<Option<String>> {
+    let response = http
+        .post("https://titlehub.xboxlive.com/titles/batch/decoration/image")
+        .header("Authorization", token.authorization_header())
+        .header("x-xbl-contract-version", "2")
+        .header("Accept-Language", "en-US")
+        .header("Accept", "application/json")
+        .json(&json!({ "pfns": null, "titleIds": [title_id.to_string()] }))
+        .send()
+        .await?;
+    let body: serde_json::Value = check(response, "getting the title's name")
+        .await?
+        .json()
+        .await?;
+    Ok(body
+        .pointer("/titles/0/name")
+        .and_then(|n| n.as_str())
+        .map(str::to_owned))
+}
+
+/// What the console says is on screen ("/streaming/properties/titleinfo"):
+/// the title id, read from whichever key holds it (decimal, hex, or a number).
+pub fn title_info_id(raw: &str) -> Option<u64> {
+    fn find(v: &serde_json::Value) -> Option<u64> {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    if key.to_ascii_lowercase().replace('_', "") == "titleid" {
+                        let id = match value {
+                            serde_json::Value::Number(n) => n.as_u64(),
+                            serde_json::Value::String(s) => {
+                                let s = s.trim();
+                                match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                                    Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                                    None => s.parse().ok(),
+                                }
+                            }
+                            _ => None,
+                        };
+                        if id.is_some_and(|id| id != 0) {
+                            return id;
+                        }
+                    }
+                }
+                map.values().find_map(find)
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(&serde_json::from_str(raw).ok()?)
+}
+
 /// A game's pictures from the Microsoft Store.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StoreArt {
@@ -357,6 +415,23 @@ mod tests {
         );
         assert!(parsed.result[0].is_game);
         assert_eq!(parsed.result[1].one_store_product_id, None);
+    }
+
+    #[test]
+    fn reads_the_title_id_from_titleinfo() {
+        assert_eq!(
+            super::title_info_id(r#"{"focused":true,"state":"Active","titleId":"219630713"}"#),
+            Some(219630713)
+        );
+        assert_eq!(
+            super::title_info_id(r#"{"focused":true,"title":{"TitleId":"0x2CB8A57F"}}"#),
+            Some(0x2CB8A57F)
+        );
+        assert_eq!(
+            super::title_info_id(r#"{"focused":true,"titleId":0}"#),
+            None
+        );
+        assert_eq!(super::title_info_id("not json"), None);
     }
 
     #[test]

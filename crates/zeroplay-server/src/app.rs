@@ -101,6 +101,8 @@ struct Inner {
     stream_quality: Option<Quality>,
     /// Installed games per console, and when they were read.
     games: HashMap<String, (Instant, Vec<Game>)>,
+    /// Names of everything installed (games and apps), by title id.
+    title_names: HashMap<u64, String>,
     /// Why a console's game list is empty (an error, or nothing found).
     games_note: HashMap<String, String>,
 }
@@ -195,6 +197,7 @@ impl App {
                 watchers: HashSet::new(),
                 stream_quality: None,
                 games: HashMap::new(),
+                title_names: HashMap::new(),
                 games_note: HashMap::new(),
             }),
             session: Mutex::new(None),
@@ -780,6 +783,53 @@ impl App {
         }
     }
 
+    // ── What is on screen ──────────────────────────────────────────────────
+
+    /// The console says what is on screen (a JSON message with its title id):
+    /// shown as the game's or app's name, looked up on Xbox Live when it is
+    /// not installed on a console ZeroPlay has read.
+    fn show_title(self: Arc<Self>, raw: &str, generation: u64) {
+        let Some(id) = consoles::title_info_id(raw) else {
+            return;
+        };
+        // The Xbox dashboard.
+        const HOME: u64 = 750_323_071;
+        let known = if id == HOME {
+            Some("Xbox Home".to_owned())
+        } else {
+            self.inner.lock().unwrap().title_names.get(&id).cloned()
+        };
+        let set = move |app: &App, name: String| {
+            if app.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            if let StreamState::Live { title, .. } = &mut app.inner.lock().unwrap().stream {
+                *title = Some(name);
+            }
+            app.changed();
+        };
+        match known {
+            Some(name) => set(&self, name),
+            None => {
+                tokio::spawn(async move {
+                    let name = async {
+                        let token = self.auth.lock().await.web_token().await?;
+                        consoles::title_name(&self.http, &token, id).await
+                    }
+                    .await;
+                    if let Ok(Some(name)) = name {
+                        self.inner
+                            .lock()
+                            .unwrap()
+                            .title_names
+                            .insert(id, name.clone());
+                        set(&self, name);
+                    }
+                });
+            }
+        }
+    }
+
     // ── Capture card ───────────────────────────────────────────────────────
 
     /// Starts (or restarts) the capture card at `quality`. If it does not
@@ -989,6 +1039,14 @@ impl App {
             let token = self.auth.lock().await.web_token().await?;
             let mut apps = consoles::installed_apps(&self.http, &token, console_id).await?;
             let reported = apps.len();
+            {
+                let mut inner = self.inner.lock().unwrap();
+                for a in &apps {
+                    if let (Some(name), true) = (&a.name, a.title_id != 0) {
+                        inner.title_names.insert(a.title_id, name.clone());
+                    }
+                }
+            }
             println!("[games] {console_id} reported {reported} installed apps");
             apps.retain(|a| a.looks_like_a_game() && a.one_store_product_id.is_some());
             // Most recently played first.
@@ -1170,7 +1228,21 @@ impl App {
                 console_name,
                 title,
             } => {
-                json!({ "state": "live", "console": console_id, "consoleName": console_name, "title": title })
+                // The installed game being played, when the title is one (its pictures).
+                let game = title.as_ref().and_then(|t| {
+                    inner
+                        .games
+                        .values()
+                        .flat_map(|(_, g)| g.iter())
+                        .find(|g| &g.name == t)
+                });
+                json!({
+                    "state": "live",
+                    "console": console_id,
+                    "consoleName": console_name,
+                    "title": title,
+                    "game": game.map(|g| json!({ "id": g.id, "image": g.image, "hero": g.hero })),
+                })
             }
             StreamState::Starting {
                 console_id,
@@ -1358,12 +1430,8 @@ impl App {
                             }
                         }
                         SessionEvent::TitleInfo(info) => {
-                            if let StreamState::Live { title, .. } =
-                                &mut app.inner.lock().unwrap().stream
-                            {
-                                *title = Some(info);
-                            }
-                            app.changed();
+                            println!("[stream] on screen: {info}");
+                            app.clone().show_title(&info, generation);
                         }
                         SessionEvent::Vibration(v) => app.route_rumble(v),
                         SessionEvent::IdleWarning { seconds } => {
