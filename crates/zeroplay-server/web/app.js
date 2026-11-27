@@ -747,7 +747,21 @@ class Feed {
     const key = bytes[1] === 1;
     const data = bytes.subarray(6);
     const timestamp = Math.round(performance.now() * 1000);
-    if (kind === 1) this.pushVideo(data, key, timestamp);
+    if (kind === 1) {
+      // How late this frame is handled compared with the earliest one: the video's
+      // clock (90 kHz) against this device's. When the device cannot keep up, frames
+      // wait in the connection and this grows; then skip to the next key frame.
+      const sent = ((bytes[2] << 24) | (bytes[3] << 16) | (bytes[4] << 8) | bytes[5]) >>> 0;
+      const offset = performance.now() - sent / 90;
+      if (this.baseline == null || offset < this.baseline || offset - this.baseline > 5000) this.baseline = offset;
+      if (offset - this.baseline > 250 && !this.waitKey) {
+        this.waitKey = true;
+        this.skipped = (this.skipped || 0) + 1;
+        send({ t: "keyframe" });
+      }
+      if (key && this.waitKey) this.baseline = offset;
+      this.pushVideo(data, key, timestamp);
+    }
     else if (kind === 2 && this.audio && this.audio.state === "configured") {
       try { this.audio.decode(new EncodedAudioChunk({ type: "key", timestamp, data })); } catch {}
     }
@@ -1433,13 +1447,20 @@ function readPads() {
   return [...pads.values()];
 }
 
-function sendPad(local, state) {
+// Buttons go out at once; stick and trigger movement at most 60 times a second,
+// rounded so a resting stick's tiny wobble does not send anything.
+function sendPad(local, raw) {
+  const r = (v) => Math.round(v * 200) / 200;
+  const state = { buttons: raw.buttons, lx: r(raw.lx), ly: r(raw.ly), rx: r(raw.rx), ry: r(raw.ry), lt: r(raw.lt), rt: r(raw.rt) };
   if (state.buttons || state.lx || state.ly || state.rx || state.ry || state.lt || state.rt) hideCountdownOnInput();
-  const key = JSON.stringify(state);
+  const key = `${state.buttons},${state.lx},${state.ly},${state.rx},${state.ry},${state.lt},${state.rt}`;
   const last = sent.get(local);
   const now = performance.now();
-  if (last && last.key === key && now - last.at < 250) return;
-  sent.set(local, { key, at: now });
+  if (last) {
+    if (last.key === key && now - last.at < 250) return;
+    if (last.buttons === state.buttons && now - last.at < 16) return;
+  }
+  sent.set(local, { key, buttons: state.buttons, at: now });
   send({ t: "pad", local, ...state });
 }
 

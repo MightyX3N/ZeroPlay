@@ -367,6 +367,11 @@ async fn ws_upgrade(
         return (StatusCode::UNAUTHORIZED, "Log in first").into_response();
     };
     let home = at_home(door, peer);
+    println!(
+        "[viewer] {} connected: {}",
+        peer.ip(),
+        if home { "home network, plain video (WebRTC)" } else { "outside the home, video inside the page's connection" }
+    );
     ws.on_upgrade(move |socket| client(app, socket, home, profile))
 }
 

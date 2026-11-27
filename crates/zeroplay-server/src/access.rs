@@ -268,8 +268,59 @@ pub fn is_home_ip(ip: IpAddr) -> bool {
 }
 
 /// True when the visitor is on the home network and came in through the home port.
+/// Besides private addresses, an IPv6 address inside one of this machine's own
+/// networks is home too: on Android a `.local` name often gives the server's
+/// public IPv6 address, so devices on the Wi-Fi come in with theirs.
 pub fn at_home(door: Door, peer: SocketAddr) -> bool {
-    door == Door::Home && is_home_ip(peer.ip())
+    door == Door::Home && (is_home_ip(peer.ip()) || in_own_ipv6_network(peer.ip()))
+}
+
+fn in_own_ipv6_network(ip: IpAddr) -> bool {
+    let IpAddr::V6(peer) = ip else { return false };
+    let Ok(table) = std::fs::read_to_string("/proc/net/if_inet6") else { return false };
+    own_ipv6_networks(&table)
+        .iter()
+        .any(|(net, len)| same_prefix(&peer, net, *len))
+}
+
+/// (address, prefix length) of this machine's global IPv6 addresses, from
+/// /proc/net/if_inet6 ("<32 hex digits> <index> <prefix len> <scope> <flags> <name>").
+fn own_ipv6_networks(table: &str) -> Vec<(std::net::Ipv6Addr, u32)> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 4 || fields[0].len() != 32 || fields[3] != "00" {
+                return None; // only global scope
+            }
+            let raw = u128::from_str_radix(fields[0], 16).ok()?;
+            let len = u32::from_str_radix(fields[2], 16).ok()?;
+            (len > 0 && len <= 128).then(|| (std::net::Ipv6Addr::from(raw), len))
+        })
+        .collect()
+}
+
+fn same_prefix(a: &std::net::Ipv6Addr, b: &std::net::Ipv6Addr, len: u32) -> bool {
+    let mask = if len >= 128 { u128::MAX } else { !(u128::MAX >> len) };
+    (u128::from(*a) & mask) == (u128::from(*b) & mask)
+}
+
+#[cfg(test)]
+mod own_network_tests {
+    use super::*;
+
+    #[test]
+    fn a_device_in_the_servers_ipv6_network_is_home() {
+        let table = "2a0245a1b2c30000020c29fffe123456 02 40 00 00     eth0\n\
+                     fe80000000000000020c29fffe123456 02 40 20 80     eth0\n\
+                     00000000000000000000000000000001 01 80 10 80       lo\n";
+        let nets = own_ipv6_networks(table);
+        assert_eq!(nets.len(), 1);
+        let tv: std::net::Ipv6Addr = "2a02:45a1:b2c3:0:1c2:33ff:fe44:5566".parse().unwrap();
+        let away: std::net::Ipv6Addr = "2a02:45a1:ffff:0:1c2:33ff:fe44:5566".parse().unwrap();
+        assert!(nets.iter().any(|(n, l)| same_prefix(&tv, n, *l)));
+        assert!(!nets.iter().any(|(n, l)| same_prefix(&away, n, *l)));
+    }
 }
 
 pub fn session_from(headers: &HeaderMap) -> Option<String> {
