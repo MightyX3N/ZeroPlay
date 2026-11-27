@@ -108,9 +108,7 @@ svg.fill { fill: currentColor; stroke: none; }
 /* The dock: frosted glass with the first row of cards inside, as Korie's Home. */
 .dock { margin: 0 max(calc(24 * var(--u)), 10px); border-radius: calc(var(--radius) * 2.2); background: var(--glass); border: 1px solid var(--rim);
   -webkit-backdrop-filter: blur(40px) saturate(1.5); backdrop-filter: blur(40px) saturate(1.5);
-  padding: max(calc(20 * var(--u)), calc(var(--tile-h) * 0.13)) 0 calc(var(--tile-h) * 0.1 + 1.2 * (1.35 * max(calc(12 * var(--u)), 13px) + 6px) + max(calc(14 * var(--u)), 12px)); }
-/* In the dock the focused card's name stays just under it (it grows with the card). */
-.dock-row .tile.selected .label { top: calc(100% + 6px); }
+  padding: max(calc(20 * var(--u)), calc(var(--tile-h) * 0.13)) 0; }
 /* The dock's cards fill it from edge to edge (the page sizes them), with room on both
    sides for the focused card to grow; the rest are in the grid below, in the same columns. */
 .dock-row { display: flex; justify-content: center; gap: var(--gap); }
@@ -138,10 +136,13 @@ svg.fill { fill: currentColor; stroke: none; }
 .tile .caption small { font-weight: 400; font-size: 12px; opacity: .8; }
 .tile .label { position: absolute; left: 0; right: 0; top: calc(100% + var(--tile-h) * 0.1 + 6px); font-size: max(calc(12 * var(--u)), 13px); opacity: .92; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile:not(.selected) .label { top: calc(100% + 6px); }
-.tile.game .name { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 10px 8px; font-size: 12px; font-weight: 600; text-align: left;
+.tile.game .name { position: absolute; left: 0; right: 0; bottom: 0; padding: calc(var(--tile-h) * 0.18) calc(var(--tile-w) * 0.045) calc(var(--tile-h) * 0.06);
+  font-size: max(12px, calc(var(--tile-w) * 0.05)); font-weight: 600; text-align: left; text-shadow: 0 1px 3px rgba(0,0,0,.6);
   background: linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,.75)); border-radius: 0 0 var(--radius) var(--radius); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile.game.has-art .name { display: none; }
-.tile-grid .tile.game .name, .dock-row .tile.game .name { display: none; }
+.tile-grid .tile.game .name { display: none; }
+/* In the dock the name is on the card, over a shade at the bottom of the picture. */
+.dock-row .tile.game.has-art .name { display: block; }
 .tile.console { background: linear-gradient(135deg, #1f7a1f, #0b3a0b); }
 .tile.console.off { background: linear-gradient(135deg, #3a3a3c, #2c2c2e); }
 

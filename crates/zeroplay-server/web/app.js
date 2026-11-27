@@ -555,7 +555,7 @@ function renderGames(s, current) {
     return tile;
   };
   // The dock: the most recently played games, as many as fit; the rest below.
-  $("game-tiles").replaceChildren(...games.slice(0, cols).map((g) => card(g, true)));
+  $("game-tiles").replaceChildren(...games.slice(0, cols).map((g) => card(g, false)));
   $("game-grid").replaceChildren(...games.slice(cols).map((g) => card(g, true)));
   show($("games-more"), games.length > cols);
 }
