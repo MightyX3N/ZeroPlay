@@ -492,7 +492,6 @@ function renderHome(s) {
       if (homeRow === "consoles" && selected === c.id) { play(); return; }
       selected = c.id; homeRow = "consoles"; renderHome(status);
     };
-    tile.onmouseenter = () => { if (homeRow !== "consoles" || selected !== c.id) { selected = c.id; homeRow = "consoles"; renderHome(status); } };
     return tile;
   }));
   renderGames(s, current);
@@ -500,8 +499,13 @@ function renderHome(s) {
   // The dock keeps the page at the top (the game big above it); rows below scroll into view.
   const inDock = document.querySelector("#game-tiles .tile.selected");
   const chosen = document.querySelector("#game-grid .tile.selected, #tiles .tile.selected");
-  if (inDock) $("home").scrollTo({ top: 0, behavior: "smooth" });
-  else if (chosen) chosen.scrollIntoView({ block: "center", behavior: "smooth" });
+  // Only when the controller or the arrow keys moved the focus: status updates (every
+  // second or so) and the mouse never scroll the page.
+  if (scrollToFocus) {
+    scrollToFocus = false;
+    if (inDock) $("home").scrollTo({ top: 0, behavior: "smooth" });
+    else if (chosen) chosen.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
 
   renderPlayers(s);
 }
@@ -510,6 +514,8 @@ function renderHome(s) {
 // The games installed on the chosen console (only those this profile may
 // play). Picking one starts it on the Xbox and joins the stream.
 
+let scrollToFocus = false;
+function focusMoved() { scrollToFocus = true; renderHome(status); }
 let homeRow = "games"; // which row has the focus: "games" (the dock) or "consoles"
 let selectedGame = null;
 
@@ -544,13 +550,8 @@ function renderGames(s, current) {
       label.textContent = g.name;
       tile.append(label);
     }
-    // As on Korie's Home: the first tap (or the pointer) gives it the focus and shows it
-    // big above the dock; a tap on the focused one plays it.
-    tile.onclick = () => {
-      if (homeRow === "games" && selectedGame === g.id) { launchGame(g); return; }
-      selectedGame = g.id; homeRow = "games"; renderHome(status);
-    };
-    tile.onmouseenter = () => { if (homeRow !== "games" || selectedGame !== g.id) { selectedGame = g.id; homeRow = "games"; renderHome(status); } };
+    // A click or tap plays it; the controller moves the focus (and the big title above).
+    tile.onclick = () => { selectedGame = g.id; homeRow = "games"; launchGame(g); };
     return tile;
   };
   // The dock: the most recently played games, as many as fit; the rest below.
@@ -1493,16 +1494,16 @@ function navigate(bits, local) {
       if (pressed(local, bits, BTN.down)) {
         if (i + cols < games.length) i += cols;
         else if (Math.floor(i / cols) < Math.floor((games.length - 1) / cols)) i = games.length - 1;
-        else if ((status.consoles || []).length) { homeRow = "consoles"; renderHome(status); return; }
+        else if ((status.consoles || []).length) { homeRow = "consoles"; focusMoved(); return; }
       }
-      if (games[i].id !== selectedGame) { selectedGame = games[i].id; renderHome(status); }
+      if (games[i].id !== selectedGame) { selectedGame = games[i].id; focusMoved(); }
       if (pressed(local, bits, BTN.a)) launchGame(games[i]);
     } else {
-      if (pressed(local, bits, BTN.up) && games.length) { homeRow = "games"; renderHome(status); return; }
+      if (pressed(local, bits, BTN.up) && games.length) { homeRow = "games"; focusMoved(); return; }
       const ids = (status.consoles || []).map((c) => c.id);
       const i = ids.indexOf(selected);
-      if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selected = ids[i + 1]; renderHome(status); }
-      if (pressed(local, bits, BTN.left) && i > 0) { selected = ids[i - 1]; renderHome(status); }
+      if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selected = ids[i + 1]; focusMoved(); }
+      if (pressed(local, bits, BTN.left) && i > 0) { selected = ids[i - 1]; focusMoved(); }
       if (pressed(local, bits, BTN.a)) play();
     }
   }
