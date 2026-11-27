@@ -192,3 +192,19 @@ container access to capture cards, sound and the graphics chip (used for
 encoding when there is one). Turn off HDCP on the Xbox (Settings → General →
 TV & display options → Video fidelity), or the card only gets a black picture.
 
+## Korie
+
+[Korie](https://github.com/MightyX3N/Korie) has a ZeroPlay add-on (Settings › Add-ons ›
+From the Korie add-on list): an Xbox tile on Home, an Xbox section in Korie TV with your
+games, recent games in the carousel and Search, and the Xbox's status in the island. It finds
+ZeroPlay on the home network by itself (UDP 7377) and signs in with a ZeroPlay profile. Play
+starts the game and opens ZeroPlay in the browser on the stream, already signed in.
+
+For apps: `GET /api/library` (consoles, the profile's games with cover and wide art, the stream)
+and `POST /api/launch {console, game, stream}`, with the token from `POST /api/login` in an
+`x-zeroplay-session` header.
+
+## Licences of included parts
+
+- Inter font (`crates/zeroplay-server/web/fonts`): SIL Open Font License 1.1 (`Inter-OFL.txt`).
+

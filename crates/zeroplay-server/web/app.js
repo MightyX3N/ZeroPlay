@@ -364,11 +364,19 @@ function onStatus(s) {
   renderRemote(s);
   renderProfiles(s);
   $("me-name").textContent = (s.you && s.you.profile && s.you.profile.name) || "Setup";
+  $("me-initial").textContent = ((s.you && s.you.profile && s.you.profile.name) || "?").trim().charAt(0).toUpperCase() || "?";
+  $("btn-logout").title = `${(s.you && s.you.profile && s.you.profile.name) || "Setup"} – log out`;
   const stream = s.stream;
   // Show a failure when it happens, not again on every page load.
   if (stream.state === "failed" && stream.error !== lastError && seenStatus) toast(stream.error);
   lastError = stream.state === "failed" ? stream.error : "";
   seenStatus = true;
+  // Opened from an app to play: join the stream it started (or start it).
+  if (autoPlay && s.signedIn && (s.consoles || []).length) {
+    autoPlay = false;
+    wantWatch = true;
+    if (stream.state === "idle" || stream.state === "failed") setTimeout(play, 0);
+  }
 
   if (!s.signedIn) {
     stopWatching();
@@ -464,31 +472,31 @@ function renderHome(s) {
     : current ? `${powerText(current.power)} · ${current.type}` : (s.consoleError || "No consoles found on this account");
   $("power-dot").className = "dot " + (current && current.power === "On" ? "on" : current && current.power === "ConnectedStandby" ? "standby" : "");
 
-  $("hero-label").textContent = liveHere ? "Streaming now" : "Your console";
-  $("hero-title").textContent = current ? current.name : "No console found";
-  $("hero-meta").textContent = current
-    ? `${current.type} · ${powerText(current.power)} · Remote play ${current.remotePlay ? "on" : "OFF – turn on remote features on the console"}`
-    : "Turn on remote features on your Xbox, then press refresh.";
-  $("btn-play-label").textContent = liveHere ? "Join stream" : "Play";
-  $("btn-play").disabled = !current || (live && !liveHere);
-  show($("btn-wake"), !!current && current.power !== "On" && !liveHere);
-  show($("btn-stop"), live);
-
-  $("shelf-count").textContent = `${consoles.length} console${consoles.length === 1 ? "" : "s"}`;
+  $("shelf-count").textContent = `${consoles.length}`;
   $("tiles").replaceChildren(...consoles.map((c) => {
     const tile = document.createElement("button");
-    tile.className = "tile" + (c.id === selected ? " selected" : "");
+    tile.className = "tile console" + (c.power === "On" || c.power === "ConnectedStandby" ? "" : " off")
+      + (homeRow === "consoles" && c.id === selected ? " selected" : "");
     tile.setAttribute("aria-label", c.name);
+    const caption = document.createElement("span");
+    caption.className = "caption";
+    const kind = document.createElement("small");
+    kind.textContent = s.stream.consoleId === c.id && live ? "Streaming" : powerText(c.power);
+    caption.append(c.name, kind);
     const label = document.createElement("span");
     label.className = "label";
-    const name = document.createElement("b");
-    name.textContent = c.name;
-    label.append(name, `${powerText(c.power)}${s.stream.consoleId === c.id && live ? " · streaming" : ""}`);
-    tile.append(label);
-    tile.onclick = () => { selected = c.id; renderHome(status); };
+    label.textContent = c.type || "Xbox";
+    tile.append(caption, label);
+    tile.onclick = () => {
+      // First tap picks it (its games show in the dock); a tap on the picked one plays.
+      if (homeRow === "consoles" && selected === c.id) { play(); return; }
+      selected = c.id; homeRow = "consoles"; renderHome(status);
+    };
+    tile.onmouseenter = () => { if (homeRow !== "consoles" || selected !== c.id) { selected = c.id; homeRow = "consoles"; renderHome(status); } };
     return tile;
   }));
   renderGames(s, current);
+  renderHero(s, current, live, liveHere);
   const chosen = document.querySelector(homeRow === "games" ? "#game-tiles .tile.selected" : "#tiles .tile.selected");
   if (chosen) chosen.scrollIntoView({ block: "nearest", inline: "nearest" });
 
@@ -499,7 +507,7 @@ function renderHome(s) {
 // The games installed on the chosen console (only those this profile may
 // play). Picking one starts it on the Xbox and joins the stream.
 
-let homeRow = "consoles"; // which row the controller moves in: "games" or "consoles"
+let homeRow = "games"; // which row has the focus: "games" (the dock) or "consoles"
 let selectedGame = null;
 
 function gamesOf(s, consoleId) {
@@ -518,19 +526,52 @@ function renderGames(s, current) {
   $("games-count").textContent = `${games.length} game${games.length === 1 ? "" : "s"}`;
   $("game-tiles").replaceChildren(...games.map((g) => {
     const tile = document.createElement("button");
-    tile.className = "tile game" + (homeRow === "games" && g.id === selectedGame ? " selected" : "");
+    const art = g.hero || g.image;
+    tile.className = "tile game" + (art ? " has-art" : "") + (homeRow === "games" && g.id === selectedGame ? " selected" : "");
     tile.setAttribute("aria-label", `Play ${g.name}`);
-    if (g.image) tile.style.backgroundImage = `url("${g.image}")`;
-    const label = document.createElement("span");
-    label.className = "label";
-    label.textContent = g.name;
-    tile.append(label);
-    tile.onclick = () => { selectedGame = g.id; homeRow = "games"; launchGame(g); };
+    if (art) tile.style.backgroundImage = `url("${art}")`;
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = g.name;
+    tile.append(name);
+    // As on Korie's Home: the first tap (or the pointer) gives it the focus and shows it
+    // big above the dock; a tap on the focused one plays it.
+    tile.onclick = () => {
+      if (homeRow === "games" && selectedGame === g.id) { launchGame(g); return; }
+      selectedGame = g.id; homeRow = "games"; renderHome(status);
+    };
+    tile.onmouseenter = () => { if (homeRow !== "games" || selectedGame !== g.id) { selectedGame = g.id; homeRow = "games"; renderHome(status); } };
     return tile;
   }));
-  document.querySelectorAll("#tiles .tile").forEach((t) => { if (homeRow === "games") t.classList.remove("selected"); });
-  const shown = homeRow === "games" ? games.find((g) => g.id === selectedGame) : games[0];
-  $("hero-art").style.backgroundImage = shown && shown.image ? `url("${shown.image}")` : "";
+}
+
+// What has the focus, shown big above the dock: the focused game (with its picture
+// filling the screen), or the console.
+function renderHero(s, current, live, liveHere) {
+  const games = current ? gamesOf(s, current.id) : [];
+  const game = homeRow === "games" ? games.find((g) => g.id === selectedGame) : null;
+  const art = game ? (game.hero || game.image) : (games[0] && (games[0].hero || games[0].image));
+  const backdrop = $("hero-art");
+  if (art) backdrop.style.backgroundImage = `url("${art}")`;
+  backdrop.classList.toggle("on", !!art);
+  if (game) {
+    // The line above already names the console.
+    $("hero-label").textContent = liveHere ? "Streaming now" : "";
+    $("hero-title").textContent = game.name;
+    $("hero-meta").textContent = liveHere ? "Starts on the Xbox and joins the stream." : "Wakes the Xbox if it is asleep, starts the game and joins the stream.";
+    $("btn-play-label").textContent = "Play";
+    $("btn-play").disabled = !current;
+  } else {
+    $("hero-label").textContent = liveHere ? "Streaming now" : "Your console";
+    $("hero-title").textContent = current ? current.name : "No console found";
+    $("hero-meta").textContent = current
+      ? `${current.type} · ${powerText(current.power)} · Remote play ${current.remotePlay ? "on" : "off – turn on remote features on the console"}`
+      : "Turn on remote features on your Xbox, then press refresh.";
+    $("btn-play-label").textContent = liveHere ? "Join stream" : "Jump into Xbox";
+    $("btn-play").disabled = !current || (live && !liveHere);
+  }
+  show($("btn-wake"), !!current && current.power !== "On" && !liveHere);
+  show($("btn-stop"), live);
 }
 
 function launchGame(g) {
@@ -570,7 +611,12 @@ $("btn-refresh").onclick = () => send({ t: "refresh" });
 $("btn-wake").onclick = () => { if (selected) { send({ t: "wake", id: selected }); toast("Asked the console to wake up.", true); } };
 $("btn-stop").onclick = () => send({ t: "stop" });
 $("btn-cancel").onclick = () => send({ t: "stop" });
-$("btn-play").onclick = play;
+$("btn-play").onclick = () => {
+  const games = status && selected ? gamesOf(status, selected) : [];
+  const game = homeRow === "games" ? games.find((g) => g.id === selectedGame) : null;
+  if (game) launchGame(game);
+  else play();
+};
 
 
 function play() {
@@ -1825,4 +1871,30 @@ if (iosApp) {
 // iPhones have no full-screen mode for pages; the home-screen app is full screen already.
 show($("m-fullscreen"), !!document.fullscreenEnabled && !window.matchMedia("(display-mode: standalone)").matches);
 
-checkAccess();
+// The island's clock.
+function tick() {
+  const now = new Date();
+  $("clock").textContent = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+}
+tick();
+setInterval(tick, 10000);
+
+// Opened from an app (Korie's ZeroPlay add-on): "#session=…" hands over its sign-in, so
+// nobody types a password with a remote; "?play=1&console=…" goes straight to the stream.
+let autoPlay = false;
+async function fromApp() {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const token = hash.get("session");
+  if (token) {
+    try {
+      await fetch("/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }) });
+    } catch {}
+  }
+  const query = new URLSearchParams(location.search);
+  if (query.get("console")) selected = query.get("console");
+  if (query.has("play")) autoPlay = true;
+  if (token || query.has("play") || query.has("console")) history.replaceState(null, "", location.pathname);
+}
+
+fromApp().finally(checkAccess);
+

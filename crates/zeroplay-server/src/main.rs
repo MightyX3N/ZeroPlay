@@ -43,6 +43,10 @@ const ICON_192: &[u8] = include_bytes!("../web/icons/icon-192.png");
 const ICON_512: &[u8] = include_bytes!("../web/icons/icon-512.png");
 const ICON_MASKABLE: &[u8] = include_bytes!("../web/icons/icon-maskable-512.png");
 const APPLE_ICON: &[u8] = include_bytes!("../web/icons/apple-touch-icon.png");
+// Inter (SIL Open Font License 1.1, web/fonts/Inter-OFL.txt), as in Korie.
+const INTER_400: &[u8] = include_bytes!("../web/fonts/Inter-400.woff2");
+const INTER_600: &[u8] = include_bytes!("../web/fonts/Inter-600.woff2");
+const INTER_800: &[u8] = include_bytes!("../web/fonts/Inter-800.woff2");
 
 #[tokio::main]
 async fn main() {
@@ -117,16 +121,31 @@ fn router(app: Arc<App>, door: Door) -> Router {
             get(|| async { image(APPLE_ICON) }),
         )
         .route("/apple-touch-icon.png", get(|| async { image(APPLE_ICON) }))
+        .route("/fonts/Inter-400.woff2", get(|| async { font(INTER_400) }))
+        .route("/fonts/Inter-600.woff2", get(|| async { font(INTER_600) }))
+        .route("/fonts/Inter-800.woff2", get(|| async { font(INTER_800) }))
         .route("/api/access", get(access_state))
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
         .route("/api/request", post(request_access))
         .route("/api/logout", post(logout))
         .route("/api/library", get(library))
+        .route("/api/session", post(adopt_session))
         .route("/api/launch", post(launch))
         .route("/ws", get(ws_upgrade))
         .layer(Extension(door))
         .with_state(app)
+}
+
+fn font(body: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 fn image(body: &'static [u8]) -> Response {
@@ -220,6 +239,22 @@ async fn login(State(app): State<Arc<App>>, Json(form): Json<ProfileForm>) -> Re
         )
             .into_response(),
         Err(error) => refused(format!("{error:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct SessionForm {
+    token: String,
+}
+
+/// An app (Korie's add-on) opens ZeroPlay in the browser with its sign-in:
+/// the page hands the token over and gets the usual cookie, so nobody types
+/// a password with a remote.
+async fn adopt_session(State(app): State<Arc<App>>, Json(form): Json<SessionForm>) -> Response {
+    if app.access.valid_session(&form.token) {
+        with_cookie(access::session_cookie(&form.token))
+    } else {
+        refused("That sign-in has expired. Log in again.")
     }
 }
 

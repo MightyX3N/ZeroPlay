@@ -457,6 +457,14 @@ impl Access {
         self.save().await
     }
 
+    /// Whether a session token is valid (an app handing its sign-in to the browser).
+    pub fn valid_session(&self, token: &str) -> bool {
+        let stored = self.stored.lock().unwrap();
+        stored.sessions.get(token).is_some_and(|s| {
+            s.expires > now_secs() && stored.profiles.iter().any(|p| p.id == s.profile)
+        })
+    }
+
     pub fn requests_open(&self) -> bool {
         self.stored.lock().unwrap().settings.allow_requests
     }
