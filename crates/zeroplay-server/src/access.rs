@@ -273,6 +273,13 @@ pub fn at_home(door: Door, peer: SocketAddr) -> bool {
 }
 
 pub fn session_from(headers: &HeaderMap) -> Option<String> {
+    // Apps and add-ons (Korie) send the session in their own header.
+    if let Some(token) = headers
+        .get("x-zeroplay-session")
+        .and_then(|v| v.to_str().ok())
+    {
+        return Some(token.to_owned());
+    }
     headers
         .get_all(header::COOKIE)
         .iter()

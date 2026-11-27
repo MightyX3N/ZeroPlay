@@ -60,6 +60,7 @@ async fn run() -> Result<()> {
     println!("ZeroPlay server on http://{home_addr}");
     println!("Data is kept in {}", app.config.data_dir.display());
 
+    spawn_discovery(home_addr.port());
     let home = tokio::net::TcpListener::bind(home_addr).await?;
     let remote = tokio::net::TcpListener::bind(remote_addr).await?;
     let serve = |listener: tokio::net::TcpListener, door: Door| {
@@ -121,6 +122,8 @@ fn router(app: Arc<App>, door: Door) -> Router {
         .route("/api/login", post(login))
         .route("/api/request", post(request_access))
         .route("/api/logout", post(logout))
+        .route("/api/library", get(library))
+        .route("/api/launch", post(launch))
         .route("/ws", get(ws_upgrade))
         .layer(Extension(door))
         .with_state(app)
@@ -209,9 +212,98 @@ async fn setup(
 
 async fn login(State(app): State<Arc<App>>, Json(form): Json<ProfileForm>) -> Response {
     match app.access.login(&form.name, &form.password).await {
-        Ok(token) => with_cookie(access::session_cookie(&token)),
+        // The token is in the answer too, for apps that send it in the
+        // x-zeroplay-session header instead of a cookie (Korie's add-on).
+        Ok(token) => (
+            [(header::SET_COOKIE, access::session_cookie(&token))],
+            Json(json!({ "ok": true, "token": token })),
+        )
+            .into_response(),
         Err(error) => refused(format!("{error:#}")),
     }
+}
+
+/// Consoles, games and the stream for apps and add-ons (Korie).
+async fn library(
+    State(app): State<Arc<App>>,
+    Extension(door): Extension<Door>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    match app.access.verdict(door, peer, &headers) {
+        Verdict::Ok(profile) => Json(app.library_for(profile.as_ref())).into_response(),
+        other => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Log in first", "verdict": other.name() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct LaunchForm {
+    console: String,
+    game: String,
+    /// Also start the stream (default); false only starts the game on the Xbox.
+    #[serde(default = "yes")]
+    stream: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn launch(
+    State(app): State<Arc<App>>,
+    Extension(door): Extension<Door>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(form): Json<LaunchForm>,
+) -> Response {
+    let Verdict::Ok(profile) = app.access.verdict(door, peer, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Log in first" })),
+        )
+            .into_response();
+    };
+    match app.launch_as(
+        profile.as_ref(),
+        &form.console,
+        &form.game,
+        None,
+        form.stream,
+    ) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(error) => refused(format!("{error:#}")),
+    }
+}
+
+/// Answers "zeroplay?" on UDP port 7377 on the home network with ZeroPlay's
+/// web port, so apps (Korie's add-on) find it without typing an address.
+fn spawn_discovery(web_port: u16) {
+    tokio::spawn(async move {
+        let socket = match tokio::net::UdpSocket::bind("0.0.0.0:7377").await {
+            Ok(socket) => socket,
+            Err(error) => {
+                println!("[discovery] not answering on UDP 7377: {error}");
+                return;
+            }
+        };
+        let answer = json!({ "name": "ZeroPlay", "port": web_port }).to_string();
+        let mut buf = [0u8; 256];
+        loop {
+            let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+                continue;
+            };
+            if String::from_utf8_lossy(&buf[..n])
+                .trim()
+                .eq_ignore_ascii_case("zeroplay?")
+            {
+                let _ = socket.send_to(answer.as_bytes(), from).await;
+            }
+        }
+    });
 }
 
 async fn request_access(State(app): State<Arc<App>>, Json(form): Json<ProfileForm>) -> Response {

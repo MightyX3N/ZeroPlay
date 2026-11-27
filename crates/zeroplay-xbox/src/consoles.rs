@@ -228,12 +228,22 @@ pub async fn title_art(
     Ok(art)
 }
 
-/// Cover art from the Microsoft Store, by Store id. Used for games Xbox Live
-/// has no art for (often Xbox 360 games played on newer consoles).
+/// A game's pictures from the Microsoft Store.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StoreArt {
+    /// Portrait cover (poster, box art or tile).
+    pub poster: Option<String>,
+    /// Wide picture for a featured banner (hero art).
+    pub hero: Option<String>,
+}
+
+/// Pictures from the Microsoft Store, by Store id: wide hero art for every
+/// game, and covers for games Xbox Live has none for (often Xbox 360 games
+/// played on newer consoles).
 pub async fn store_art(
     http: &reqwest::Client,
     product_ids: &[String],
-) -> Result<std::collections::HashMap<String, String>> {
+) -> Result<std::collections::HashMap<String, StoreArt>> {
     let mut art = std::collections::HashMap::new();
     for chunk in product_ids.chunks(20) {
         let response = http
@@ -251,8 +261,15 @@ pub async fn store_art(
     Ok(art)
 }
 
-/// Picks a portrait cover (poster, then box art, then tile) for each product.
-fn parse_store_art(body: &serde_json::Value) -> Vec<(String, String)> {
+fn https(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("//") {
+        format!("https://{rest}")
+    } else {
+        url.replace("http://", "https://")
+    }
+}
+
+fn parse_store_art(body: &serde_json::Value) -> Vec<(String, StoreArt)> {
     let mut out = Vec::new();
     for product in body
         .get("Products")
@@ -273,16 +290,17 @@ fn parse_store_art(body: &serde_json::Value) -> Vec<(String, String)> {
                     .flatten()
             })
         };
-        let url = of_purpose("Poster")
+        let poster = of_purpose("Poster")
             .or_else(|| of_purpose("BoxArt"))
-            .or_else(|| of_purpose("Tile"));
-        if let Some(url) = url {
-            let url = if let Some(rest) = url.strip_prefix("//") {
-                format!("https://{rest}")
-            } else {
-                url.replace("http://", "https://")
-            };
-            out.push((id.to_owned(), url));
+            .or_else(|| of_purpose("Tile"))
+            .map(https);
+        let hero = of_purpose("SuperHeroArt")
+            .or_else(|| of_purpose("Hero"))
+            .or_else(|| of_purpose("TitledHeroArt"))
+            .or_else(|| of_purpose("BrandedKeyArt"))
+            .map(https);
+        if poster.is_some() || hero.is_some() {
+            out.push((id.to_owned(), StoreArt { poster, hero }));
         }
     }
     out
@@ -346,6 +364,7 @@ mod tests {
         let body = serde_json::json!({ "Products": [
             { "ProductId": "BRZ1", "LocalizedProperties": [ { "Images": [
                 { "ImagePurpose": "Tile", "Uri": "//store-images.s-microsoft.com/tile" },
+                { "ImagePurpose": "SuperHeroArt", "Uri": "//store-images.s-microsoft.com/hero" },
                 { "ImagePurpose": "BoxArt", "Uri": "//store-images.s-microsoft.com/box" } ] } ] },
             { "ProductId": "NONE", "LocalizedProperties": [ { "Images": [] } ] }
         ]});
@@ -353,7 +372,10 @@ mod tests {
             parse_store_art(&body),
             vec![(
                 "BRZ1".to_owned(),
-                "https://store-images.s-microsoft.com/box".to_owned()
+                StoreArt {
+                    poster: Some("https://store-images.s-microsoft.com/box".to_owned()),
+                    hero: Some("https://store-images.s-microsoft.com/hero".to_owned()),
+                }
             )]
         );
     }

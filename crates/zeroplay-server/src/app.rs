@@ -112,6 +112,8 @@ pub struct Game {
     pub id: String,
     pub name: String,
     pub image: Option<String>,
+    /// Wide picture for featured banners.
+    pub hero: Option<String>,
 }
 
 /// Whether a profile may launch this game (no profile = first setup at home).
@@ -1010,23 +1012,24 @@ impl App {
                     id: a.one_store_product_id.unwrap_or_default(),
                     name: a.name.unwrap_or_else(|| "Game".to_owned()),
                     image: art.get(&a.title_id).cloned(),
+                    hero: None,
                 })
                 .collect();
-            // The Store has art for games Xbox Live has none for.
-            let missing: Vec<String> = games
-                .iter()
-                .filter(|g| g.image.is_none())
-                .map(|g| g.id.clone())
-                .collect();
-            if !missing.is_empty() {
-                match consoles::store_art(&self.http, &missing).await {
-                    Ok(store) => {
-                        for game in games.iter_mut().filter(|g| g.image.is_none()) {
-                            game.image = store.get(&game.id).cloned();
+            // The Store has wide hero art for featured banners, and covers for
+            // games Xbox Live has none for.
+            let ids: Vec<String> = games.iter().map(|g| g.id.clone()).collect();
+            match consoles::store_art(&self.http, &ids).await {
+                Ok(store) => {
+                    for game in games.iter_mut() {
+                        if let Some(art) = store.get(&game.id) {
+                            if game.image.is_none() {
+                                game.image = art.poster.clone();
+                            }
+                            game.hero = art.hero.clone();
                         }
                     }
-                    Err(error) => println!("[games] no Store art: {error:#}"),
                 }
+                Err(error) => println!("[games] no Store art: {error:#}"),
             }
             anyhow::Ok((reported, games))
         }
@@ -1065,7 +1068,24 @@ impl App {
     /// stream if it is not running yet.
     pub fn launch(self: &Arc<Self>, viewer: u64, console_id: &str, game: &str) -> Result<()> {
         let profile = self.viewer_profile(viewer);
-        if !may_play(profile.as_ref(), game) {
+        self.launch_as(profile.as_ref(), console_id, game, Some(viewer), true)
+    }
+
+    /// Starts a game for a profile (from the page, or from an app such as
+    /// Korie). `stream`: also start the stream; without it the game only
+    /// starts on the Xbox (for playing on the TV it is connected to).
+    pub fn launch_as(
+        self: &Arc<Self>,
+        profile: Option<&Profile>,
+        console_id: &str,
+        game: &str,
+        viewer: Option<u64>,
+        stream: bool,
+    ) -> Result<()> {
+        if !self.inner.lock().unwrap().signed_in {
+            bail!("ZeroPlay is not signed in to Xbox yet.");
+        }
+        if !may_play(profile, game) {
             bail!("Your profile may not play this game.");
         }
         let app = self.clone();
@@ -1094,7 +1114,7 @@ impl App {
                     Err(error) => last_error = Some(error),
                 }
             }
-            if let Some(error) = last_error {
+            if let (Some(error), Some(viewer)) = (last_error, viewer) {
                 app.send_direct(
                     viewer,
                     Direct::Error {
@@ -1109,10 +1129,68 @@ impl App {
                 | StreamState::Live { .. }
                 | StreamState::Reconnecting { .. }
         );
-        if !running {
+        if stream && !running {
             self.start(&console)?;
         }
         Ok(())
+    }
+
+    /// Consoles, the games a profile may play, and the stream, for apps and
+    /// add-ons (Korie).
+    pub fn library_for(&self, profile: Option<&Profile>) -> Value {
+        let profile = profile.and_then(|p| self.access.profile(&p.id));
+        let inner = self.inner.lock().unwrap();
+        let consoles: Vec<Value> = inner
+            .consoles
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "name": c.name,
+                    "type": c.console_type,
+                    "power": c.power_state,
+                })
+            })
+            .collect();
+        let mut games = Vec::new();
+        for (console, (_, list)) in &inner.games {
+            for g in list.iter().filter(|g| may_play(profile.as_ref(), &g.id)) {
+                games.push(json!({
+                    "id": g.id,
+                    "name": g.name,
+                    "image": g.image,
+                    "hero": g.hero,
+                    "console": console,
+                }));
+            }
+        }
+        let stream = match &inner.stream {
+            StreamState::Live {
+                console_id,
+                console_name,
+                title,
+            } => {
+                json!({ "state": "live", "console": console_id, "consoleName": console_name, "title": title })
+            }
+            StreamState::Starting {
+                console_id,
+                console_name,
+                ..
+            } => {
+                json!({ "state": "starting", "console": console_id, "consoleName": console_name })
+            }
+            StreamState::Reconnecting { .. } => json!({ "state": "reconnecting" }),
+            StreamState::Failed { message } => json!({ "state": "failed", "error": message }),
+            StreamState::Idle => json!({ "state": "idle" }),
+        };
+        json!({
+            "signedIn": inner.signed_in,
+            "consoles": consoles,
+            "games": games,
+            "stream": stream,
+            "watching": inner.watchers.len(),
+            "profile": profile.map(|p| json!({ "id": p.id, "name": p.name })),
+        })
     }
 
     pub async fn wake(&self, console_id: &str) -> Result<()> {
@@ -1526,7 +1604,9 @@ impl App {
                 let list: Vec<Value> = games
                     .iter()
                     .filter(|g| may_play(viewer_profile.as_ref(), &g.id))
-                    .map(|g| json!({ "id": g.id, "name": g.name, "image": g.image }))
+                    .map(
+                        |g| json!({ "id": g.id, "name": g.name, "image": g.image, "hero": g.hero }),
+                    )
                     .collect();
                 (console.clone(), Value::from(list))
             })
