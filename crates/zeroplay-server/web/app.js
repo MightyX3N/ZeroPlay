@@ -497,8 +497,11 @@ function renderHome(s) {
   }));
   renderGames(s, current);
   renderHero(s, current, live, liveHere);
-  const chosen = document.querySelector(homeRow === "games" ? "#game-tiles .tile.selected" : "#tiles .tile.selected");
-  if (chosen) chosen.scrollIntoView({ block: "nearest", inline: "nearest" });
+  // The dock keeps the page at the top (the game big above it); rows below scroll into view.
+  const inDock = document.querySelector("#game-tiles .tile.selected");
+  const chosen = document.querySelector("#game-grid .tile.selected, #tiles .tile.selected");
+  if (inDock) $("home").scrollTo({ top: 0, behavior: "smooth" });
+  else if (chosen) chosen.scrollIntoView({ block: "center", behavior: "smooth" });
 
   renderPlayers(s);
 }
@@ -524,7 +527,8 @@ function renderGames(s, current) {
   if (!games.length && homeRow === "games") homeRow = "consoles";
   $("games-title").textContent = current ? `Games on ${current.name}` : "Games";
   $("games-count").textContent = `${games.length} game${games.length === 1 ? "" : "s"}`;
-  $("game-tiles").replaceChildren(...games.map((g) => {
+  const cols = homeCols();
+  const card = (g, labelled) => {
     const tile = document.createElement("button");
     const art = g.hero || g.image;
     tile.className = "tile game" + (art ? " has-art" : "") + (homeRow === "games" && g.id === selectedGame ? " selected" : "");
@@ -534,6 +538,12 @@ function renderGames(s, current) {
     name.className = "name";
     name.textContent = g.name;
     tile.append(name);
+    if (labelled) {
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = g.name;
+      tile.append(label);
+    }
     // As on Korie's Home: the first tap (or the pointer) gives it the focus and shows it
     // big above the dock; a tap on the focused one plays it.
     tile.onclick = () => {
@@ -542,8 +552,29 @@ function renderGames(s, current) {
     };
     tile.onmouseenter = () => { if (homeRow !== "games" || selectedGame !== g.id) { selectedGame = g.id; homeRow = "games"; renderHome(status); } };
     return tile;
-  }));
+  };
+  // The dock: the most recently played games, as many as fit; the rest below.
+  $("game-tiles").replaceChildren(...games.slice(0, cols).map((g) => card(g, false)));
+  $("game-grid").replaceChildren(...games.slice(cols).map((g) => card(g, true)));
+  show($("games-more"), games.length > cols);
 }
+
+// How many cards fit in a row (6 on a 16:9 screen, as Korie), from the CSS sizes.
+function homeCols() {
+  const probe = $("tile-probe");
+  const style = getComputedStyle(probe);
+  const tile = (probe.offsetWidth - (parseFloat(style.paddingLeft) || 0)) || 200;
+  const gap = parseFloat(style.marginRight) || 20;
+  const side = parseFloat(style.paddingLeft) || 20;
+  const width = $("home").clientWidth || window.innerWidth;
+  const cols = Math.max(2, Math.floor((width - 2 * side + gap) / (tile + gap)));
+  $("home").style.setProperty("--cols", cols);
+  return cols;
+}
+
+window.addEventListener("resize", () => {
+  if (status && !$("home").classList.contains("hidden")) renderHome(status);
+});
 
 // What has the focus, shown big above the dock: the focused game (with its picture
 // filling the screen), or the console.
@@ -1451,15 +1482,23 @@ function navigate(bits, local) {
     if (menuOpen) renderMenu();
   } else if (onHome && status) {
     const games = gamesOf(status, selected);
-    if (pressed(local, bits, BTN.up) && games.length) { homeRow = "games"; renderHome(status); }
-    if (pressed(local, bits, BTN.down)) { homeRow = "consoles"; renderHome(status); }
-    if (homeRow === "games") {
-      const ids = games.map((g) => g.id);
-      const i = ids.indexOf(selectedGame);
-      if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selectedGame = ids[i + 1]; renderHome(status); }
-      if (pressed(local, bits, BTN.left) && i > 0) { selectedGame = ids[i - 1]; renderHome(status); }
-      if (pressed(local, bits, BTN.a)) { const g = games.find((x) => x.id === selectedGame); if (g) launchGame(g); }
+    const cols = homeCols();
+    if (homeRow === "games" && games.length) {
+      // The dock is the first row of the games; the grid below continues in the same columns.
+      let i = Math.max(0, games.findIndex((g) => g.id === selectedGame));
+      const col = i % cols;
+      if (pressed(local, bits, BTN.right) && col < cols - 1 && i + 1 < games.length) i += 1;
+      if (pressed(local, bits, BTN.left) && col > 0) i -= 1;
+      if (pressed(local, bits, BTN.up) && i - cols >= 0) i -= cols;
+      if (pressed(local, bits, BTN.down)) {
+        if (i + cols < games.length) i += cols;
+        else if (Math.floor(i / cols) < Math.floor((games.length - 1) / cols)) i = games.length - 1;
+        else if ((status.consoles || []).length) { homeRow = "consoles"; renderHome(status); return; }
+      }
+      if (games[i].id !== selectedGame) { selectedGame = games[i].id; renderHome(status); }
+      if (pressed(local, bits, BTN.a)) launchGame(games[i]);
     } else {
+      if (pressed(local, bits, BTN.up) && games.length) { homeRow = "games"; renderHome(status); return; }
       const ids = (status.consoles || []).map((c) => c.id);
       const i = ids.indexOf(selected);
       if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selected = ids[i + 1]; renderHome(status); }

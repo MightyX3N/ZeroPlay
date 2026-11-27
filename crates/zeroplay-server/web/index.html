@@ -69,17 +69,24 @@
   <section id="games-shelf" class="dock hidden">
     <span id="games-title" class="visually-hidden">Games</span>
     <span id="games-count" class="visually-hidden"></span>
-    <div id="game-tiles" class="row-tiles"></div>
+    <div id="game-tiles" class="dock-row"></div>
     <p id="games-note" class="dock-note hidden"></p>
   </section>
 
+  <!-- Every other game, in the dock's columns, with names under the cards. -->
+  <section id="games-more" class="shelf hidden">
+    <div class="shelf-head grid-width"><span class="shelf-title">All Games</span></div>
+    <div id="game-grid" class="tile-grid grid-width"></div>
+  </section>
+
   <section class="shelf">
-    <div class="shelf-head">
+    <div class="shelf-head grid-width">
       <span class="shelf-title">Consoles</span>
       <span id="shelf-count" class="shelf-count"></span>
     </div>
-    <div id="tiles" class="row-tiles"></div>
+    <div id="tiles" class="tile-grid grid-width"></div>
   </section>
+  <div id="tile-probe" class="tile-probe" aria-hidden="true"></div>
 
   <footer class="hints">
     <span><b class="glyph a">A</b>Play</span>
