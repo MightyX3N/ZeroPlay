@@ -35,9 +35,22 @@ pub struct ViewerPeer {
     forwarder: tokio::task::JoinHandle<()>,
     port: u16,
     app: Arc<App>,
+    /// (timestamp sent to this player, the console's own) for recent frames.
+    frames: Arc<std::sync::Mutex<std::collections::VecDeque<(u32, u32)>>>,
 }
 
 impl ViewerPeer {
+    /// The console's timestamp for a video frame this player was sent.
+    pub fn console_timestamp(&self, sent: u32) -> Option<u32> {
+        self.frames
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(out, _)| *out == sent)
+            .map(|(_, original)| *original)
+    }
+
     pub async fn close(self) {
         self.forwarder.abort();
         let _ = self.peer.close().await;
@@ -216,8 +229,10 @@ async fn build(
         }
     };
 
+    let frames = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     let forwarder = tokio::spawn(forward(
         app.clone(),
+        frames.clone(),
         app.media.subscribe(),
         video,
         audio,
@@ -231,6 +246,7 @@ async fn build(
             forwarder,
             port,
             app: app.clone(),
+            frames,
         },
         answer,
     ))
@@ -308,6 +324,7 @@ impl Continuity {
 
 async fn forward(
     app: Arc<App>,
+    frames: Arc<std::sync::Mutex<std::collections::VecDeque<(u32, u32)>>>,
     mut media: broadcast::Receiver<MediaPacket>,
     video: Arc<TrackLocalStaticRTP>,
     audio: Arc<TrackLocalStaticRTP>,
@@ -319,7 +336,17 @@ async fn forward(
     loop {
         let (mut packet, track, ssrc, pt) = match media.recv().await {
             Ok(MediaPacket::Video(mut packet)) => {
+                let original = packet.header.timestamp;
                 video_seq.apply(&mut packet.header);
+                let sent = packet.header.timestamp;
+                let mut recent = frames.lock().unwrap();
+                if recent.back().map(|(out, _)| *out) != Some(sent) {
+                    if recent.len() >= 300 {
+                        recent.pop_front();
+                    }
+                    recent.push_back((sent, original));
+                }
+                drop(recent);
                 (packet, &video, video_ssrc, video_pt)
             }
             Ok(MediaPacket::Audio(mut packet)) => {

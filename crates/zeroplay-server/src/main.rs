@@ -408,6 +408,10 @@ enum FromPage {
     Unplug {
         local: u8,
     },
+    /// Frames this screen showed: [timestamp, ms since it arrived, ms since shown].
+    Frames {
+        f: Vec<(u32, f64, f64)>,
+    },
     Key {
         code: u8,
         down: bool,
@@ -479,8 +483,10 @@ async fn client(app: Arc<App>, socket: WebSocket, home: bool, profile: Option<ac
     let mut watch = Watch::default();
     let (media_tx, mut media_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(96);
 
+    // Each status is the whole picture; one identical to the last is not sent again.
+    let mut last_status = app.status_for(id).to_string();
     let mut send_ok = sink
-        .send(Message::Text(app.status_for(id).to_string().into()))
+        .send(Message::Text(last_status.clone().into()))
         .await
         .is_ok();
     while send_ok {
@@ -503,7 +509,11 @@ async fn client(app: Arc<App>, socket: WebSocket, home: bool, profile: Option<ac
                 if let Err(tokio::sync::broadcast::error::RecvError::Closed) = update {
                     break;
                 }
-                send_ok = sink.send(Message::Text(app.status_for(id).to_string().into())).await.is_ok();
+                let status = app.status_for(id).to_string();
+                if status != last_status {
+                    last_status = status.clone();
+                    send_ok = sink.send(Message::Text(status.into())).await.is_ok();
+                }
             }
             Some(message) = direct.recv() => {
                 send_ok = sink.send(Message::Text(serde_json::to_string(&message).unwrap_or_default().into())).await.is_ok();
@@ -652,6 +662,19 @@ async fn handle(
             ..Default::default()
         }),
         FromPage::Keyframe => app.request_keyframe(),
+        FromPage::Frames { f } => {
+            // Plain video carries this player's own timestamps; turn them back
+            // into the console's. Video inside the connection already has those.
+            let frames: Vec<(u32, f64, f64)> = match &watch.peer {
+                Some(peer) => f
+                    .into_iter()
+                    .filter_map(|(ts, a, s)| peer.console_timestamp(ts).map(|c| (c, a, s)))
+                    .collect(),
+                None if watch.media.is_some() => f,
+                None => Vec::new(),
+            };
+            app.report_frames(id, &frames);
+        }
         FromPage::PlayitConnect | FromPage::PlayitDisconnect if !home || !is_admin(app, id) => {
             return error("Remote access can only be changed by an admin on your home network.");
         }
@@ -757,6 +780,10 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<FromPage>(r#"{"t":"keyframe"}"#).unwrap(),
             FromPage::Keyframe
+        ));
+        assert!(matches!(
+            serde_json::from_str::<FromPage>(r#"{"t":"frames","f":[[4294967295,12,-3]]}"#).unwrap(),
+            FromPage::Frames { f } if f == vec![(u32::MAX, 12.0, -3.0)]
         ));
     }
 

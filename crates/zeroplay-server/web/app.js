@@ -421,9 +421,14 @@ function onStatus(s) {
     stopWatching();
     wantWatch = false;
   }
-  renderHome(s);
+  // Nothing to draw while the page is not on screen (another tab, or minimised).
+  if (!document.hidden) renderHome(s);
   showScreen("home");
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && status && !$("home").classList.contains("hidden")) renderHome(status);
+});
 
 function renderSignin(s) {
   show($("signin-start"), !s.login);
@@ -549,6 +554,7 @@ function renderGames(s, current) {
     const art = g.hero || g.image;
     tile.className = "tile game" + (art ? " has-art" : "") + (homeRow === "games" && g.id === selectedGame ? " selected" : "");
     tile.setAttribute("aria-label", `Play ${g.name}`);
+    tile.dataset.id = g.id;
     if (art) tile.style.backgroundImage = `url("${art}")`;
     const name = document.createElement("span");
     name.className = "name";
@@ -565,10 +571,23 @@ function renderGames(s, current) {
     return tile;
   };
   // The dock: the most recently played games, as many as fit; the rest below.
-  $("game-tiles").replaceChildren(...games.slice(0, cols).map((g) => card(g, false)));
-  $("game-grid").replaceChildren(...games.slice(cols).map((g) => card(g, true)));
+  // Built again only when the games or the room changed; otherwise only the
+  // focus moves (a status arrives on every change, and pictures are heavy).
+  const key = cols + "|" + games.map((g) => `${g.id}\u0001${g.name}\u0001${g.hero || g.image || ""}`).join("\u0002");
+  if (key !== gamesKey) {
+    gamesKey = key;
+    $("game-tiles").replaceChildren(...games.slice(0, cols).map((g) => card(g, false)));
+    $("game-grid").replaceChildren(...games.slice(cols).map((g) => card(g, true)));
+  } else {
+    for (const tile of [...$("game-tiles").children, ...$("game-grid").children]) {
+      tile.classList.toggle("selected", homeRow === "games" && tile.dataset.id === selectedGame);
+    }
+  }
   show($("games-more"), games.length > cols);
 }
+
+let gamesKey = "";
+let colsKey = "";
 
 // How many cards fit in a row (6 on a 16:9 screen, as Korie), from the CSS sizes.
 function homeCols() {
@@ -586,11 +605,16 @@ function homeCols() {
   let cols = 2;
   while (size(cols + 1) >= tile * 0.92) cols++;
   const fitted = size(cols);
-  const home = $("home").style;
-  home.setProperty("--cols", cols);
-  home.setProperty("--tile-w", `${fitted}px`);
-  home.setProperty("--tile-h", `${fitted * 3 / 5}px`);
-  home.setProperty("--radius", `${fitted * 0.071}px`);
+  // Only when it changed: a new size makes the browser lay out and paint everything again.
+  const sizes = `${cols}|${fitted}`;
+  if (sizes !== colsKey) {
+    colsKey = sizes;
+    const home = $("home").style;
+    home.setProperty("--cols", cols);
+    home.setProperty("--tile-w", `${fitted}px`);
+    home.setProperty("--tile-h", `${fitted * 3 / 5}px`);
+    home.setProperty("--radius", `${fitted * 0.071}px`);
+  }
   return cols;
 }
 
@@ -716,6 +740,7 @@ class Feed {
     this.media = this.canvas.captureStream();
     this.frames = 0;
     this.bytes = 0;
+    this.sentAt = new Map(); // decoder timestamp → [console timestamp, arrived]
     this.height = 0;
     this.codec = null;
     this.waitKey = true;
@@ -760,6 +785,8 @@ class Feed {
         send({ t: "keyframe" });
       }
       if (key && this.waitKey) this.baseline = offset;
+      this.sentAt.set(timestamp, [sent, performance.now()]);
+      if (this.sentAt.size > 120) this.sentAt.delete(this.sentAt.keys().next().value);
       this.pushVideo(data, key, timestamp);
     }
     else if (kind === 2 && this.audio && this.audio.state === "configured") {
@@ -805,6 +832,11 @@ class Feed {
       this.canvas.height = frame.displayHeight;
     }
     this.ctx2d.drawImage(frame, 0, 0);
+    const origin = this.sentAt.get(frame.timestamp);
+    if (origin) {
+      this.sentAt.delete(frame.timestamp);
+      reportFrame(origin[0], origin[1], performance.now());
+    }
     this.height = frame.displayHeight;
     this.frames++;
     frame.close();
@@ -911,6 +943,36 @@ function refreshVideo() {
   if (feed) { feed.close(); feed = null; }
   startWatching();
 }
+
+// ── Frame reports ────────────────────────────────────────────────────────────
+// Like the Xbox app: for every frame the screen shows, tell the console when it
+// arrived and when it was shown, so it can measure the delay and adjust.
+
+let frameReports = [];
+
+function reportFrame(timestamp, arrived, shown) {
+  if (frameReports.length < 60) frameReports.push([timestamp >>> 0, arrived, shown]);
+}
+
+setInterval(() => {
+  if (!frameReports.length || !watching()) { frameReports = []; return; }
+  const now = performance.now();
+  send({ t: "frames", f: frameReports.map(([ts, arrived, shown]) => [ts, Math.round(now - arrived), Math.round(now - shown)]) });
+  frameReports = [];
+}, 50);
+
+function watchFrames(video) {
+  if (!video.requestVideoFrameCallback || video.dataset.frames) return;
+  video.dataset.frames = "1";
+  const onFrame = (_, meta) => {
+    if (pc && meta.rtpTimestamp != null) {
+      reportFrame(meta.rtpTimestamp, meta.receiveTime || meta.presentationTime, meta.expectedDisplayTime);
+    }
+    video.requestVideoFrameCallback(onFrame);
+  };
+  video.requestVideoFrameCallback(onFrame);
+}
+watchFrames($("video"));
 
 function stopWatching() {
   stopRecording();

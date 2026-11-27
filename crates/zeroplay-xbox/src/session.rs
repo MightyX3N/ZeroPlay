@@ -40,7 +40,7 @@ use webrtc::peer_connection::{
 
 use crate::api::{HomeApi, IceCandidate, SessionState};
 use crate::auth::Auth;
-use crate::input::{self, GamepadState, KeyboardFrame, MouseFrame, ServerReport, Vibration};
+use crate::input::{self, GamepadState, KeyboardFrame, MetadataFrame, MouseFrame, ServerReport, Vibration};
 use crate::teredo;
 
 /// How SDP and ICE candidates get to the console and back.
@@ -208,6 +208,8 @@ struct Shared {
     pads: Mutex<[Option<GamepadState>; 4]>,
     mouse: Mutex<Vec<MouseFrame>>,
     keys: Mutex<Vec<KeyboardFrame>>,
+    /// Frames the player's screen showed, reported back to the console.
+    frames: Mutex<Vec<MetadataFrame>>,
     ready: AtomicBool,
     closed: AtomicBool,
     sequence: AtomicU32,
@@ -633,6 +635,7 @@ impl Session {
             started: Instant::now(),
             pads: Mutex::new([None; 4]),
             mouse: Mutex::new(Vec::new()),
+            frames: Mutex::new(Vec::new()),
             keys: Mutex::new(Vec::new()),
             ready: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -901,6 +904,27 @@ impl Session {
         self.shared.keys.lock().unwrap().push(frame);
     }
 
+    /// Reports a frame the player's screen showed, as the Xbox app does: the
+    /// frame's RTP timestamp, how long ago it arrived and how long ago it was
+    /// (or until it will be) shown. The console uses these to measure the delay.
+    pub fn report_frame(&self, rtp_timestamp: u32, arrived_ago_ms: f64, shown_ago_ms: f64) {
+        let now = self.shared.now_ms();
+        let at = |ago: f64| (now - ago).max(0.0) as u32;
+        let arrived = at(arrived_ago_ms.max(0.0));
+        let shown = at(shown_ago_ms).max(arrived);
+        let mut frames = self.shared.frames.lock().unwrap();
+        if frames.len() >= 32 {
+            frames.remove(0);
+        }
+        frames.push(MetadataFrame {
+            server_data_key: rtp_timestamp,
+            first_frame_packet_arrival_time_ms: arrived,
+            frame_submitted_time_ms: arrived,
+            frame_decoded_time_ms: shown,
+            frame_rendered_time_ms: shown,
+        });
+    }
+
     /// Asks the console for a fresh full video frame.
     pub async fn request_keyframe(&self) -> Result<()> {
         send_json(&self.channels.control, keyframe_request_message()).await
@@ -1097,9 +1121,10 @@ async fn run_input_loop(shared: Arc<Shared>, channels: Arc<Channels>) {
             .collect();
         let mouse = std::mem::take(&mut *shared.mouse.lock().unwrap());
         let keys = std::mem::take(&mut *shared.keys.lock().unwrap());
+        let frames = std::mem::take(&mut *shared.frames.lock().unwrap());
         let sequence = shared.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(packet) =
-            input::input_packet(sequence, shared.now_ms(), &[], &pads, &mouse, &keys)
+            input::input_packet(sequence, shared.now_ms(), &frames, &pads, &mouse, &keys)
         else {
             shared.sequence.fetch_sub(1, Ordering::Relaxed);
             continue;

@@ -156,7 +156,10 @@ pub struct App {
     capture_skip: Mutex<HashMap<String, Vec<String>>>,
     /// Bumped by every capture start, so an old check leaves a new one alone.
     capture_runs: AtomicU64,
+    capture_devices: Mutex<Option<(Instant, Value, Value)>>,
     updates: broadcast::Sender<()>,
+    /// The player whose screen reports its frames to the console (one at a time).
+    reporter: Mutex<Option<(u64, Instant)>>,
     pub playit: Arc<Playit>,
     pub access: Access,
 }
@@ -214,7 +217,9 @@ impl App {
             capture_note: Mutex::new(None),
             capture_skip: Mutex::new(HashMap::new()),
             capture_runs: AtomicU64::new(0),
+            capture_devices: Mutex::new(None),
             updates,
+            reporter: Mutex::new(None),
             playit,
             access,
         });
@@ -243,11 +248,19 @@ impl App {
         let ticker = app.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(Duration::from_secs(1));
+            let mut shown_fps = None;
             loop {
                 every.tick().await;
                 ticker.tick().await;
-                // Keep the admin's capture frame rate current.
-                if ticker.capture.lock().unwrap().is_some() {
+                // Keep the admin's capture frame rate current: only when it moved.
+                let fps = ticker
+                    .capture
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| c.fps.load(Ordering::Relaxed));
+                if fps != shown_fps {
+                    shown_fps = fps;
                     ticker.changed();
                 }
             }
@@ -266,6 +279,26 @@ impl App {
             }
         });
         Ok(app)
+    }
+
+    /// Frames a player's screen showed: (console timestamp, ms since it arrived,
+    /// ms since it was shown). Passed on to the console like the Xbox app does,
+    /// from one player at a time, and not while a capture card supplies the picture.
+    pub fn report_frames(&self, viewer: u64, frames: &[(u32, f64, f64)]) {
+        if frames.is_empty() || self.capture_video.load(Ordering::Relaxed) {
+            return;
+        }
+        {
+            let mut reporter = self.reporter.lock().unwrap();
+            match *reporter {
+                Some((id, at)) if id != viewer && at.elapsed() < Duration::from_secs(2) => return,
+                _ => *reporter = Some((viewer, Instant::now())),
+            }
+        }
+        let Some(session) = self.session.lock().unwrap().clone() else { return };
+        for &(ts, arrived, shown) in frames {
+            session.report_frame(ts, arrived, shown);
+        }
     }
 
     pub fn changed(&self) {
@@ -1050,9 +1083,25 @@ impl App {
     /// What the admin sees about capture cards.
     fn capture_status(&self) -> Value {
         let settings = self.access.settings().capture;
+        // The card lists are looked up at most every 10 seconds (each page gets a
+        // status on every change; opening every device each time is wasteful).
+        let (devices, audio) = {
+            let mut cached = self.capture_devices.lock().unwrap();
+            match &*cached {
+                Some((at, devices, audio)) if at.elapsed() < Duration::from_secs(10) => {
+                    (devices.clone(), audio.clone())
+                }
+                _ => {
+                    let devices = json!(crate::capture::video_devices());
+                    let audio = json!(crate::capture::audio_devices());
+                    *cached = Some((Instant::now(), devices.clone(), audio.clone()));
+                    (devices, audio)
+                }
+            }
+        };
         json!({
-            "devices": crate::capture::video_devices(),
-            "audio": crate::capture::audio_devices(),
+            "devices": devices,
+            "audio": audio,
             "gpu": crate::capture::gpu().is_some(),
             "device": settings.device,
             "audioChoice": settings.audio,
