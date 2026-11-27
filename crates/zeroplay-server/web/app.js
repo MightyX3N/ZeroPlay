@@ -503,7 +503,7 @@ function renderHome(s) {
   // second or so) and the mouse never scroll the page.
   if (scrollToFocus) {
     scrollToFocus = false;
-    if (inDock) $("home").scrollTo({ top: 0, behavior: "smooth" });
+    if (inDock || homeRow === "island") $("home").scrollTo({ top: 0, behavior: "smooth" });
     else if (chosen) chosen.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
@@ -515,8 +515,17 @@ function renderHome(s) {
 // play). Picking one starts it on the Xbox and joins the stream.
 
 let scrollToFocus = false;
-function focusMoved() { scrollToFocus = true; renderHome(status); }
-let homeRow = "games"; // which row has the focus: "games" (the dock) or "consoles"
+function focusMoved() { scrollToFocus = true; renderHome(status); renderIslandFocus(); }
+
+// The island's buttons a controller can reach (Up from the top row of games):
+// Controls and Refresh.
+let islandIndex = 0;
+const islandButtons = () => ["btn-controls", "btn-refresh"].map($).filter((b) => b && !b.classList.contains("hidden"));
+function renderIslandFocus() {
+  const buttons = islandButtons();
+  document.querySelectorAll(".island-btn").forEach((b) => b.classList.toggle("focused", homeRow === "island" && b === buttons[islandIndex]));
+}
+let homeRow = "games"; // which row has the focus: "island", "games" (the dock) or "consoles"
 let selectedGame = null;
 
 function gamesOf(s, consoleId) {
@@ -531,6 +540,7 @@ function renderGames(s, current) {
   $("games-note").textContent = note;
   if (!games.find((g) => g.id === selectedGame)) selectedGame = games[0] ? games[0].id : null;
   if (!games.length && homeRow === "games") homeRow = "consoles";
+  renderIslandFocus();
   $("games-title").textContent = current ? `Games on ${current.name}` : "Games";
   $("games-count").textContent = `${games.length} game${games.length === 1 ? "" : "s"}`;
   const cols = homeCols();
@@ -592,7 +602,7 @@ window.addEventListener("resize", () => {
 // filling the screen), or the console.
 function renderHero(s, current, live, liveHere) {
   const games = current ? gamesOf(s, current.id) : [];
-  const game = homeRow === "games" ? games.find((g) => g.id === selectedGame) : null;
+  const game = homeRow !== "consoles" ? games.find((g) => g.id === selectedGame) : null;
   const art = game ? (game.hero || game.image) : (games[0] && (games[0].hero || games[0].image));
   const backdrop = $("hero-art");
   if (art) backdrop.style.backgroundImage = `url("${art}")`;
@@ -656,7 +666,7 @@ $("btn-stop").onclick = () => send({ t: "stop" });
 $("btn-cancel").onclick = () => send({ t: "stop" });
 $("btn-play").onclick = () => {
   const games = status && selected ? gamesOf(status, selected) : [];
-  const game = homeRow === "games" ? games.find((g) => g.id === selectedGame) : null;
+  const game = homeRow !== "consoles" ? games.find((g) => g.id === selectedGame) : null;
   if (game) launchGame(game);
   else play();
 };
@@ -960,11 +970,11 @@ setInterval(async () => {
 
 let menuOpen = false;
 let menuIndex = 0;
-// Saved per device (this browser). With nothing saved: on for computers with a
-// mouse, off for phones and tablets.
-const hasMouse = window.matchMedia("(pointer: fine)").matches;
-const savedKeyboard = localStorage.getItem("zp-keyboard");
-let keyboardOn = savedKeyboard ? savedKeyboard === "on" : hasMouse;
+// The keyboard and mouse need no switch: a key that is pressed plays, and the
+// tip about the mouse only shows for a few seconds after a mouse moves over the
+// picture (never on a TV, phone or tablet without one).
+let mouseSeenAt = 0;
+let mouseUsed = localStorage.getItem("zp-mouse-used") === "1";
 const SENSITIVITIES = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
 let mouseSens = Number(localStorage.getItem("zp-mouse-sens")) || 1;
 let statsOn = localStorage.getItem("zp-stats") === "on";
@@ -1027,10 +1037,8 @@ function renderMenu() {
   $("menu-title").textContent = status.stream.consoleName || "Xbox";
   const n = status.players.length;
   $("menu-players").textContent = `${n} playing · ${status.watching.length} watching`;
-  $("m-keyboard").textContent = `Keyboard and mouse: ${keyboardOn ? "on" : "off"}`;
   $("m-sens").textContent = `Mouse sensitivity: ${mouseSens}`;
-  show($("m-sens"), hasMouse && keyboardOn);
-  $("m-players").textContent = separatePlayers ? "Controllers here: separate players" : "Controllers here: one player";
+  show($("m-sens"), mouseUsed);
   const turns = status.turns || {};
   show($("m-turns"), !!turns.enabled);
   $("m-turns").textContent = `Take turns: ${turns.optedIn ? "on" : "off"}`;
@@ -1067,24 +1075,12 @@ function closeMenu() {
 }
 
 $("m-resume").onclick = closeMenu;
-$("m-keyboard").onclick = () => {
-  keyboardOn = !keyboardOn;
-  localStorage.setItem("zp-keyboard", keyboardOn ? "on" : "off");
-  if (!keyboardOn) {
-    if (separatePlayers) {
-      send({ t: "unplug", local: KEYBOARD_LOCAL });
-      sent.delete(KEYBOARD_LOCAL);
-    }
-    if (document.pointerLockElement) document.exitPointerLock();
-  }
-  renderMenu();
-};
-$("m-players").onclick = () => {
+$("c-players").onclick = () => {
   separatePlayers = !separatePlayers;
   localStorage.setItem("zp-separate", separatePlayers ? "on" : "off");
   unplugAll();
   mergedWasActive = false;
-  renderMenu();
+  renderControls();
 };
 $("m-turns").onclick = () => send({ t: "turns", on: !(status && status.turns && status.turns.optedIn) });
 $("m-more-time").onclick = () => send({ t: "requestTime" });
@@ -1259,6 +1255,7 @@ function renderControls() {
     el("button", { className: "menu-item", textContent: "Reset buttons to default", onclick: () => { resetButtons(controlsPad); renderControls(); } }),
     el("p", { className: "muted small", textContent: "Pick an action, then press the button for it. Extra buttons, such as back paddles, can be picked too when the browser sees them." }),
   ] : []));
+  $("c-players").textContent = separatePlayers ? "Controllers here: each one is its own player" : "Controllers here: all play as one player";
   $("g-on").textContent = `Gyro: ${gyro.on ? "on" : "off"}`;
   $("g-stick").textContent = `Gyro moves: ${gyro.stick === "left" ? "left" : "right"} stick`;
   $("g-sens").textContent = `Gyro sensitivity: ${gyro.sens}  ◀ ▶`;
@@ -1501,7 +1498,10 @@ function navigate(bits, local) {
       const col = i % cols;
       if (pressed(local, bits, BTN.right) && col < cols - 1 && i + 1 < games.length) i += 1;
       if (pressed(local, bits, BTN.left) && col > 0) i -= 1;
-      if (pressed(local, bits, BTN.up) && i - cols >= 0) i -= cols;
+      if (pressed(local, bits, BTN.up)) {
+        if (i - cols >= 0) i -= cols;
+        else { homeRow = "island"; islandIndex = 0; focusMoved(); return; }
+      }
       if (pressed(local, bits, BTN.down)) {
         if (i + cols < games.length) i += cols;
         else if (Math.floor(i / cols) < Math.floor((games.length - 1) / cols)) i = games.length - 1;
@@ -1509,8 +1509,19 @@ function navigate(bits, local) {
       }
       if (games[i].id !== selectedGame) { selectedGame = games[i].id; focusMoved(); }
       if (pressed(local, bits, BTN.a)) launchGame(games[i]);
+    } else if (homeRow === "island") {
+      const buttons = islandButtons();
+      if (pressed(local, bits, BTN.right) && islandIndex < buttons.length - 1) { islandIndex++; renderIslandFocus(); }
+      if (pressed(local, bits, BTN.left) && islandIndex > 0) { islandIndex--; renderIslandFocus(); }
+      if (pressed(local, bits, BTN.down)) { homeRow = games.length ? "games" : "consoles"; focusMoved(); return; }
+      if (pressed(local, bits, BTN.a) && buttons[islandIndex]) buttons[islandIndex].click();
     } else {
-      if (pressed(local, bits, BTN.up) && games.length) { homeRow = "games"; focusMoved(); return; }
+      if (pressed(local, bits, BTN.up)) {
+        homeRow = games.length ? "games" : "island";
+        islandIndex = 0;
+        focusMoved();
+        return;
+      }
       const ids = (status.consoles || []).map((c) => c.id);
       const i = ids.indexOf(selected);
       if (pressed(local, bits, BTN.right) && i < ids.length - 1) { selected = ids[i + 1]; focusMoved(); }
@@ -1559,7 +1570,7 @@ function pollPads() {
     prevButtons.set(gp.index, state.buttons);
   }
   updateMouseStick();
-  const kbActive = playing && keyboardOn && (keysDown.size > 0 || mouseLocked());
+  const kbActive = playing && (keysDown.size > 0 || mouseLocked());
   if (kbActive) states.set(KEYBOARD_LOCAL, keyboardState());
 
   // The gyro goes onto the first controller (or the merged one).
@@ -1602,7 +1613,7 @@ function pollPads() {
   } else {
     comboSince = 0;
   }
-  show($("mouse-hint"), playing && keyboardOn && hasMouse && !mouseLocked());
+  show($("mouse-hint"), playing && !mouseLocked() && performance.now() - mouseSeenAt < 4000);
 }
 // Read the controllers every frame, like games do, with a timer as a backup
 // for when the browser slows frames down.
@@ -1692,8 +1703,18 @@ function updateMouseStick() {
 let shapedX = 0;
 let shapedY = 0;
 
-$("video").addEventListener("click", () => {
-  if (keyboardOn && !menuOpen && !mouseLocked()) {
+// A real mouse moving over the picture (not a touch, and not a TV remote).
+$("video").addEventListener("pointermove", (event) => {
+  if (event.pointerType === "mouse" && (event.movementX || event.movementY) && !mouseLocked()) {
+    mouseSeenAt = performance.now();
+  }
+});
+
+$("video").addEventListener("click", (event) => {
+  if (event.pointerType && event.pointerType !== "mouse") return;
+  if (!menuOpen && !controlsOpen && !mouseLocked()) {
+    mouseSeenAt = 0;
+    if (!mouseUsed) { mouseUsed = true; localStorage.setItem("zp-mouse-used", "1"); }
     const request = $("video").requestPointerLock({ unadjustedMovement: true });
     if (request && request.catch) request.catch(() => $("video").requestPointerLock());
   }
@@ -1747,7 +1768,7 @@ window.addEventListener("keydown", (event) => {
     if (menuOpen) closeMenu(); else openMenu();
     return;
   }
-  if (menuOpen || !keyboardOn) return;
+  if (menuOpen || controlsOpen) return;
   if (KEY_BUTTONS[event.code] !== undefined || KEY_OTHER.has(event.code)) {
     event.preventDefault();
     keysDown.add(event.code);

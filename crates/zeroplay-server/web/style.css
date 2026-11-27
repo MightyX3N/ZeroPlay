@@ -71,7 +71,7 @@ svg.fill { fill: currentColor; stroke: none; }
   -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4); }
 .island-btn { position: relative; width: 36px; height: 36px; border-radius: 50%; border: 0; background: transparent; display: flex; align-items: center; justify-content: center; transition: background .15s, color .15s, transform .15s; }
 .island-btn svg { width: 18px; height: 18px; }
-.island-btn:hover, .island-btn:focus-visible { background: #fff; color: var(--dark); outline: none; transform: scale(1.08); }
+.island-btn:hover, .island-btn:focus-visible, .island-btn.focused { background: #fff; color: var(--dark); outline: none; transform: scale(1.08); }
 .island-btn.on { color: var(--green-text); }
 .clock { font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; padding: 0 6px 0 4px; }
 .avatar-btn { border: 0; background: transparent; padding: 0; border-radius: 50%; }

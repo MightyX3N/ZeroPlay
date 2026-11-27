@@ -98,10 +98,13 @@
 <aside id="controls" class="menu controls hidden" aria-label="Controls">
   <div class="now">
     <span class="eyebrow">Controls</span>
-    <strong>Buttons and gyro</strong>
-    <span class="muted small">Saved on this device, per controller.</span>
+    <strong>Players, buttons and gyro</strong>
+    <span class="muted small">Saved on this device.</span>
   </div>
   <p id="capture" class="capture hidden"></p>
+  <button id="c-players" class="menu-item">Controllers here: all play as one player</button>
+  <p class="muted small">One player: every controller, the keyboard and the mouse here control the same player, so you can switch between them. Each its own player: for local co-op, every controller gets its own player on the Xbox.</p>
+  <span class="eyebrow controls-head">Buttons (per controller)</span>
   <div id="controls-pads"></div>
   <div id="controls-binds"></div>
   <span class="eyebrow controls-head">Gyro (this device's motion sensor)</span>
@@ -318,10 +321,8 @@
     <button class="menu-item sub hidden" data-quality="low">Low (720p)</button>
     <button id="m-volume" class="menu-item" data-adjust="volume">Volume: 100%</button>
     <button id="m-record" class="menu-item">Start recording</button>
-    <button id="m-keyboard" class="menu-item">Keyboard and mouse: on</button>
     <button id="m-sens" class="menu-item">Mouse sensitivity: 1</button>
-    <button id="m-players" class="menu-item">Controllers here: one player</button>
-    <button id="m-controls" class="menu-item">Controls: buttons and gyro…</button>
+    <button id="m-controls" class="menu-item">Controls: players, buttons and gyro…</button>
     <button id="m-fullscreen" class="menu-item">Full screen</button>
     <button id="m-stats" class="menu-item">Show stats</button>
     <button id="m-home" class="menu-item">Back to home</button>
