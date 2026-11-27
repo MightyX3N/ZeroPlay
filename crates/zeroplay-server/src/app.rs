@@ -103,6 +103,8 @@ struct Inner {
     games: HashMap<String, (Instant, Vec<Game>)>,
     /// Names of everything installed (games and apps), by title id.
     title_names: HashMap<u64, String>,
+    /// What each console family is running, from Xbox Live presence.
+    playing: Vec<consoles::Playing>,
     /// Why a console's game list is empty (an error, or nothing found).
     games_note: HashMap<String, String>,
 }
@@ -198,6 +200,7 @@ impl App {
                 stream_quality: None,
                 games: HashMap::new(),
                 title_names: HashMap::new(),
+                playing: Vec::new(),
                 games_note: HashMap::new(),
             }),
             session: Mutex::new(None),
@@ -253,6 +256,15 @@ impl App {
             let app2 = app.clone();
             tokio::spawn(async move { app2.refresh_consoles().await });
         }
+        // What the consoles are running, kept current for the island.
+        let watcher = app.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                every.tick().await;
+                watcher.refresh_playing().await;
+            }
+        });
         Ok(app)
     }
 
@@ -785,6 +797,38 @@ impl App {
 
     // ── What is on screen ──────────────────────────────────────────────────
 
+    /// Reads what the account's consoles are running from Xbox Live presence.
+    async fn refresh_playing(&self) {
+        if !self.inner.lock().unwrap().signed_in {
+            return;
+        }
+        let result = async {
+            let token = self.auth.lock().await.web_token().await?;
+            consoles::playing(&self.http, &token).await
+        }
+        .await;
+        let Ok(now) = result else { return };
+        let changed = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.playing == now {
+                false
+            } else {
+                for p in &now {
+                    println!(
+                        "[console] running: {}{}",
+                        p.name,
+                        p.activity.as_deref().map(|a| format!(" ({a})")).unwrap_or_default()
+                    );
+                }
+                inner.playing = now;
+                true
+            }
+        };
+        if changed {
+            self.changed();
+        }
+    }
+
     /// The console says what is on screen (a JSON message with its title id):
     /// shown as the game's or app's name, looked up on Xbox Live when it is
     /// not installed on a console ZeroPlay has read.
@@ -1198,6 +1242,38 @@ impl App {
     pub fn library_for(&self, profile: Option<&Profile>) -> Value {
         let profile = profile.and_then(|p| self.access.profile(&p.id));
         let inner = self.inner.lock().unwrap();
+        // An installed game by title id or name (for its pictures).
+        let installed = |id: u64, name: &str| {
+            inner
+                .games
+                .values()
+                .flat_map(|(_, g)| g.iter())
+                .find(|g| g.name == name || inner.title_names.get(&id) == Some(&g.name))
+                .cloned()
+        };
+        // What a console is running: presence names the console family
+        // ("Scarlett" is Series X|S), so a lone console that is on gets it.
+        let on: Vec<&Console> = inner.consoles.iter().filter(|c| c.power_state == "On").collect();
+        let playing_on = |c: &Console| -> Option<&consoles::Playing> {
+            if c.power_state != "On" {
+                return None;
+            }
+            let series = c.console_type.contains("Series") || c.console_type.contains("Scarlett");
+            let family = |p: &&consoles::Playing| (p.device == "Scarlett") == series;
+            inner.playing.iter().find(family).or_else(|| {
+                (on.len() == 1).then(|| inner.playing.first()).flatten()
+            })
+        };
+        let playing_json = |p: &consoles::Playing| {
+            let game = installed(p.title_id, &p.name);
+            json!({
+                "id": p.title_id.to_string(),
+                "name": p.name,
+                "activity": p.activity,
+                "image": game.as_ref().and_then(|g| g.image.clone()),
+                "hero": game.as_ref().and_then(|g| g.hero.clone()),
+            })
+        };
         let consoles: Vec<Value> = inner
             .consoles
             .iter()
@@ -1207,6 +1283,7 @@ impl App {
                     "name": c.name,
                     "type": c.console_type,
                     "power": c.power_state,
+                    "playing": playing_on(c).map(playing_json),
                 })
             })
             .collect();
@@ -1228,19 +1305,26 @@ impl App {
                 console_name,
                 title,
             } => {
-                // The installed game being played, when the title is one (its pictures).
+                // What the console is running: its own message while streaming,
+                // otherwise Xbox Live presence; and what the game says is going on.
+                let presence = inner
+                    .consoles
+                    .iter()
+                    .find(|c| &c.id == console_id)
+                    .and_then(|c| playing_on(c));
+                let title = title.clone().or_else(|| presence.map(|p| p.name.clone()));
+                let activity = presence
+                    .filter(|p| Some(&p.name) == title.as_ref())
+                    .and_then(|p| p.activity.clone());
                 let game = title.as_ref().and_then(|t| {
-                    inner
-                        .games
-                        .values()
-                        .flat_map(|(_, g)| g.iter())
-                        .find(|g| &g.name == t)
+                    installed(presence.map(|p| p.title_id).unwrap_or(0), t)
                 });
                 json!({
                     "state": "live",
                     "console": console_id,
                     "consoleName": console_name,
                     "title": title,
+                    "activity": activity,
                     "game": game.map(|g| json!({ "id": g.id, "image": g.image, "hero": g.hero })),
                 })
             }

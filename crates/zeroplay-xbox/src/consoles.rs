@@ -501,3 +501,135 @@ mod tests {
         assert!(parsed.result.is_empty());
     }
 }
+
+/// What one of the account's consoles is running, from Xbox Live presence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Playing {
+    /// The console family presence reports ("Scarlett" is Series X|S, "XboxOne").
+    pub device: String,
+    pub title_id: u64,
+    pub name: String,
+    /// What the game says the player is doing ("Racing in Mexico"), when it says.
+    pub activity: Option<String>,
+}
+
+/// What the signed-in account is running on its consoles right now: the
+/// title in the foreground on each console that is online.
+pub async fn playing(http: &reqwest::Client, token: &XboxToken) -> Result<Vec<Playing>> {
+    let response = http
+        .get("https://userpresence.xboxlive.com/users/me?level=all")
+        .header("Authorization", token.authorization_header())
+        .header("x-xbl-contract-version", "3")
+        .header("Accept-Language", "en-US")
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    let body: serde_json::Value = check(response, "reading what the console is running")
+        .await?
+        .json()
+        .await?;
+    Ok(parse_playing(&body))
+}
+
+fn parse_playing(body: &serde_json::Value) -> Vec<Playing> {
+    const HOME: u64 = 750_323_071;
+    let mut out = Vec::new();
+    let devices = body.get("devices").and_then(|d| d.as_array());
+    for device in devices.into_iter().flatten() {
+        let kind = device.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if !(kind == "Scarlett" || kind.starts_with("Xbox")) {
+            continue; // a PC or phone
+        }
+        let titles: Vec<&serde_json::Value> = device
+            .get("titles")
+            .and_then(|t| t.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|t| t.get("state").and_then(|s| s.as_str()).unwrap_or("Active") == "Active")
+            .collect();
+        let id_of = |t: &serde_json::Value| -> u64 {
+            match t.get("id") {
+                Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
+                Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0),
+                _ => 0,
+            }
+        };
+        let placement = |t: &serde_json::Value| {
+            t.get("placement").and_then(|p| p.as_str()).unwrap_or("").to_owned()
+        };
+        // The full-screen title; otherwise anything that is not the dashboard;
+        // otherwise the dashboard.
+        let chosen = titles
+            .iter()
+            .find(|t| placement(t) == "Full" && id_of(t) != HOME)
+            .or_else(|| titles.iter().find(|t| id_of(t) != HOME && placement(t) != "Background"))
+            .or_else(|| titles.iter().find(|t| id_of(t) == HOME));
+        let Some(title) = chosen else { continue };
+        let id = id_of(title);
+        let name = if id == HOME {
+            "Xbox Home".to_owned()
+        } else {
+            match title.get("name").and_then(|n| n.as_str()) {
+                Some(n) if !n.is_empty() => n.to_owned(),
+                _ => continue,
+            }
+        };
+        let activity = title
+            .pointer("/activity/richPresence")
+            .and_then(|r| r.as_str())
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_owned);
+        out.push(Playing {
+            device: kind.to_owned(),
+            title_id: id,
+            name,
+            activity,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod playing_tests {
+    use super::*;
+
+    #[test]
+    fn picks_the_full_screen_game_with_its_activity() {
+        let body = json!({
+            "state": "Online",
+            "devices": [
+                { "type": "WindowsOneCore", "titles": [{ "id": "1", "name": "Xbox App", "placement": "Full", "state": "Active" }] },
+                { "type": "Scarlett", "titles": [
+                    { "id": "750323071", "name": "Home", "placement": "Background", "state": "Active" },
+                    { "id": "2030093255", "name": "Forza Horizon 5", "placement": "Full", "state": "Active",
+                      "activity": { "richPresence": "Racing in Mexico" } }
+                ]}
+            ]
+        });
+        assert_eq!(
+            parse_playing(&body),
+            vec![Playing {
+                device: "Scarlett".into(),
+                title_id: 2030093255,
+                name: "Forza Horizon 5".into(),
+                activity: Some("Racing in Mexico".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_dashboard_when_nothing_else_runs() {
+        let body = json!({ "devices": [{ "type": "Scarlett", "titles": [
+            { "id": "750323071", "name": "Home", "placement": "Full", "state": "Active" }
+        ]}]});
+        let p = parse_playing(&body);
+        assert_eq!(p[0].name, "Xbox Home");
+        assert_eq!(p[0].activity, None);
+    }
+
+    #[test]
+    fn offline_has_nothing() {
+        assert!(parse_playing(&json!({ "state": "Offline" })).is_empty());
+    }
+}
